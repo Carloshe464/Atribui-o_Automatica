@@ -5,7 +5,7 @@
 <style>
   :root { color-scheme: light dark; }
   body {
-    width: 340px; margin: 0; padding: 14px;
+    width: 344px; margin: 0; padding: 14px;
     font: 13px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif;
     background: Canvas; color: CanvasText;
   }
@@ -19,18 +19,12 @@
   .row { display: flex; justify-content: space-between; gap: 10px; }
   .row + .row { margin-top: 3px; }
   .row > span:last-child { font-variant-numeric: tabular-nums; font-weight: 600; }
-  .muted { opacity: .65; font-size: 11.5px; font-weight: 400 !important; }
-  .gate { display: flex; gap: 7px; align-items: baseline; }
-  .gate + .gate { margin-top: 5px; }
-  .mark { width: 13px; flex: none; font-weight: 700; }
-  .yes { color: #2b8a3e; }
-  .no  { color: #d4593a; }
-  .wait{ opacity: .5; }
-  .gate div { font-size: 11.5px; }
+  .muted { opacity: .65; font-size: 11.5px; }
+  #gate { font-size: 12px; margin-bottom: 10px; padding: 8px 10px; border-radius: 8px;
+          background: color-mix(in srgb, CanvasText 7%, Canvas); line-height: 1.35; }
+  #gate b { display: block; font-size: 10.5px; text-transform: uppercase;
+            letter-spacing: .06em; opacity: .55; margin-bottom: 2px; font-weight: 600; }
   ul#blocked { margin: 6px 0 0; padding-left: 16px; font-size: 11.5px; opacity: .8; }
-  ul#blocked li { margin-bottom: 2px; }
-  #blind-note { font-size: 11.5px; opacity: .75; line-height: 1.4; }
-  #s-blind { font-size: 11.5px; color: #d4593a; margin-top: 5px; display: none; }
   label { display: block; margin-bottom: 9px; }
   label > span { display: block; margin-bottom: 3px; }
   input[type=text], input[type=number], select {
@@ -47,6 +41,7 @@
     background: color-mix(in srgb, CanvasText 8%, Canvas); color: CanvasText;
   }
   button.primary { background: #03363d; color: #fff; border-color: #03363d; }
+  button.danger { border-color: #d4593a; color: #d4593a; }
   button + button { margin-top: 6px; }
   hr { border: 0; border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent); margin: 12px 0; }
   details summary { cursor: pointer; font-size: 12px; opacity: .8; }
@@ -57,34 +52,20 @@
 <body>
   <h1>Zendesk — Auto-Atribuição</h1>
 
-  <div class="card" id="gates">
-    <div class="gate">
-      <span class="mark wait" id="g1-mark">•</span>
-      <div><b>Fila</b> — <span id="g1">…</span></div>
-    </div>
-    <div class="gate">
-      <span class="mark wait" id="g2-mark">•</span>
-      <div><b>Agente</b> — <span id="g2">verificando…</span></div>
-    </div>
-    <div class="gate">
-      <span class="mark wait" id="g3-mark">•</span>
-      <div><b>Status</b> — <span id="g3">…</span></div>
-    </div>
-  </div>
+  <div id="gate"><b>Situação</b><span id="gate-text">conectando…</span></div>
 
   <div class="card" id="status">
-    <div class="row"><span>Barra: "Conversas"</span><span id="s-conv">–</span></div>
-    <div class="row"><span>Chats meus</span><span id="s-mine">–</span></div>
-    <div class="row"><span>Pendentes (todas as filas)</span><span id="s-pending">–</span></div>
-    <div class="row"><span>Elegíveis pelas 3 regras</span><span id="s-eligible">–</span></div>
-    <div class="row"><span class="muted" id="s-note">Aguardando a aba do Zendesk…</span></div>
+    <div class="row"><span>Meus chats</span><span id="s-mine">–</span></div>
+    <div class="row"><span>Esperando na fila</span><span id="s-queue">–</span></div>
+    <div class="row"><span>Disjuntor (janela)</span><span id="s-breaker">–</span></div>
+    <div class="row"><span>Agente</span><span id="s-agent">–</span></div>
+    <div class="row muted"><span id="s-src"></span></div>
     <ul id="blocked"></ul>
-    <div id="s-blind"></div>
   </div>
 
   <div class="check">
     <input type="checkbox" id="enabled">
-    <label for="enabled">Atribuição automática ligada</label>
+    <label for="enabled"><b>Atribuição automática ligada</b></label>
   </div>
 
   <label>
@@ -93,93 +74,117 @@
   </label>
 
   <label>
+    <span>Teto do disjuntor (minutos)</span>
+    <input type="number" id="breakerMinutes" min="1" max="120" step="1">
+  </label>
+
+  <label>
     <span>Alertar após (minutos sem resposta)</span>
     <input type="number" id="idleMinutes" min="1" max="60" step="1">
   </label>
 
-  <hr>
-
-  <label>
-    <span>Fila permitida (única)</span>
-    <input type="text" id="queueFilter">
-  </label>
-
-  <label>
-    <span>Correspondência da fila</span>
-    <select id="queueMatchMode">
-      <option value="exact">Exata — o rótulo tem que ser idêntico (recomendado)</option>
-      <option value="contains">Contém — aceita o nome em qualquer parte da linha</option>
-    </select>
-  </label>
-
-  <label>
-    <span>Agente autorizado</span>
-    <input type="text" id="agentName">
-  </label>
-
-  <label>
-    <span>Status permitidos (separados por vírgula)</span>
-    <input type="text" id="allowedStatuses" placeholder="novo">
-  </label>
-
-  <hr>
-
-  <label>
-    <span>Como assumir</span>
-    <select id="serveMethod">
-      <option value="shortcut">Atalho de teclado — serve o próximo da fila</option>
-      <option value="globalButton">Botão "Servir chat" da barra — idem</option>
-      <option value="rowButton">Botão da própria linha — escolhe o chat</option>
-    </select>
-  </label>
-
-  <label id="shortcut-wrap">
-    <span>Atalho</span>
-    <input type="text" id="shortcut" placeholder="Ctrl+Alt+Q">
-  </label>
-
-  <div class="card" id="blind-note">
-    Os dois primeiros modos servem <b>o próximo da fila</b>, sem escolher qual.
-    Para não violar as regras de fila e status, só disparam quando
-    <b>todos</b> os pendentes forem elegíveis.
-  </div>
-
-  <div class="check">
-    <input type="checkbox" id="autoOpenPanel">
-    <label for="autoOpenPanel">Abrir o painel "Conversas" sozinho</label>
-  </div>
-
-  <div class="check">
-    <input type="checkbox" id="beep">
-    <label for="beep">Som no alerta de silêncio</label>
-  </div>
-
   <button class="primary" id="save">Salvar</button>
+  <button class="danger" id="reset-breaker">Zerar disjuntor</button>
   <div id="msg"></div>
 
   <hr>
 
   <details>
-    <summary>Ajuste fino / diagnóstico</summary>
+    <summary>Travas de fila, status e agente</summary>
+
+    <div class="check">
+      <input type="checkbox" id="strictQueueGate">
+      <label for="strictQueueGate">Só puxar da fila e status abaixo</label>
+    </div>
+
+    <label>
+      <span>Fila permitida (única)</span>
+      <input type="text" id="queueFilter">
+    </label>
+
+    <label>
+      <span>Correspondência da fila</span>
+      <select id="queueMatchMode">
+        <option value="exact">Exata (recomendado)</option>
+        <option value="contains">Contém</option>
+      </select>
+    </label>
+
+    <label>
+      <span>Status permitidos</span>
+      <input type="text" id="allowedStatuses" placeholder="novo">
+    </label>
+
+    <label>
+      <span>Agente autorizado (vazio = qualquer um)</span>
+      <input type="text" id="agentName">
+    </label>
+  </details>
+
+  <details>
+    <summary>Como puxar e como contar</summary>
+
+    <label>
+      <span>Método</span>
+      <select id="serveMethod">
+        <option value="auto">Automático — botão da barra, senão atalho</option>
+        <option value="globalButton">Só o botão da barra</option>
+        <option value="shortcut">Só o atalho</option>
+        <option value="rowButton">Botão da linha (escolhe o chat)</option>
+      </select>
+    </label>
+
+    <label>
+      <span>Atalho</span>
+      <input type="text" id="shortcut" placeholder="Ctrl+Alt+Q">
+    </label>
+
+    <label>
+      <span>Contar meus chats por</span>
+      <select id="mineSource">
+        <option value="auto">Automático — lista, senão API</option>
+        <option value="dom">Só a lista na tela</option>
+        <option value="api">Só a API</option>
+      </select>
+    </label>
+
+    <label>
+      <span>Consulta da API</span>
+      <input type="text" id="mineApiQuery">
+    </label>
+
+    <div class="check">
+      <input type="checkbox" id="autoOpenPanel">
+      <label for="autoOpenPanel">Abrir o painel "Conversas" sozinho</label>
+    </div>
+
+    <div class="check">
+      <input type="checkbox" id="beep">
+      <label for="beep">Som no alerta de silêncio</label>
+    </div>
+  </details>
+
+  <details>
+    <summary>Diagnóstico</summary>
     <div class="check">
       <input type="checkbox" id="debug">
       <label for="debug">Log no console da página</label>
     </div>
     <label>
       <span>Seletor dos itens da lista</span>
-      <input type="text" id="listItemSelector" placeholder="vazio = detecção automática">
+      <input type="text" id="listItemSelector" placeholder="vazio = automático">
     </label>
     <label>
       <span>Seletor do botão Servir</span>
-      <input type="text" id="serveSelector" placeholder="vazio = detecção por texto">
+      <input type="text" id="serveSelector" placeholder="vazio = por texto">
     </label>
     <label>
-      <span>Seletor do rótulo da fila (dentro da linha)</span>
-      <input type="text" id="queueSelector" placeholder="vazio = procura texto exato">
+      <span>Seletor do rótulo da fila</span>
+      <input type="text" id="queueSelector" placeholder="vazio = texto exato">
     </label>
     <label>
-      <span>Seletor do rótulo de status (dentro da linha)</span>
-      <input type="text" id="statusSelector" placeholder="vazio = procura texto exato">
+      <span>Seletor do rótulo de status</span>
+      <input type="text" id="statusSelector" placeholder="vazio = badge/texto">
     </label>
     <button id="diag">Copiar diagnóstico</button>
   </details>

@@ -21,7 +21,12 @@ function row({ name, queue, status, badge, pending, extra = '' }) {
   </div>`;
 }
 
-async function run({ rows, agentName = 'Carlos Lemos', cfg = {}, mutate = null, waitMs = 1500 }) {
+async function run({
+  rows, agentName = 'Carlos Lemos', cfg = {}, mutate = null, waitMs = 1500,
+  seed = {},            // estado inicial do chrome.storage (disjuntor, lock)
+  killContext = false,  // simula extensao recarregada sem F5
+  disableMidFlight = false // desliga a trava no disco depois de carregada
+}) {
   const dom = new JSDOM(`<!doctype html><body><nav>${rows.join('')}</nav></body>`, {
     url: 'https://acme.zendesk.com/agent/dashboard',
     runScripts: 'outside-only'
@@ -62,30 +67,61 @@ async function run({ rows, agentName = 'Carlos Lemos', cfg = {}, mutate = null, 
       // tem sua propria secao, com a trava de "todos elegiveis".
       serveMethod: 'rowButton',
       shortcut: 'Ctrl+Alt+Q',
+      strictQueueGate: true,
+      mineSource: 'dom',
+      breakerMinutes: 10,
       beep: false, debug: false,
       listItemSelector: '', serveSelector: '', queueSelector: '', statusSelector: '',
       ...cfg
-    }
+    },
+    ...seed
   };
 
   let statusReply = null;
   const listeners = [];
+  // Storage real em memoria: o disjuntor e o lock entre abas dependem de
+  // get/set funcionando de verdade, nao de um stub que ignora escrita.
+  const pick = (keys) => {
+    if (keys === null || keys === undefined) return { ...stored };
+    const list = Array.isArray(keys) ? keys : [keys];
+    const out = {};
+    for (const k of list) if (k in stored) out[k] = stored[k];
+    return out;
+  };
+
   w.chrome = {
-    storage: {
-      local: { get: (k, cb) => cb(stored) },
-      onChanged: { addListener: () => {} }
-    },
     runtime: {
+      id: 'test-extension-id', // contextAlive() checa isto
+      lastError: undefined,
       onMessage: { addListener: (fn) => listeners.push(fn) },
       sendMessage: () => {}
+    },
+    storage: {
+      local: {
+        get: (keys, cb) => cb(pick(keys)),
+        set: (obj, cb) => { Object.assign(stored, obj); if (cb) cb(); }
+      },
+      onChanged: { addListener: () => {} }
     }
   };
+
+  // Permite ao teste inspecionar/derrubar o storage compartilhado.
+  w.__stored = stored;
   w.fetch = async (url) => {
     if (!String(url).includes('/api/v2/users/me.json')) throw new Error('404');
     return { ok: true, json: async () => ({ user: { name: agentName, id: 1 } }) };
   };
 
   w.eval(SRC);
+
+  // Deixa a config carregar, entao muda o mundo por baixo da instancia.
+  if (killContext || disableMidFlight) {
+    await new Promise((r) => setTimeout(r, 200));
+    // Cache em memoria segue com enabled:true; so o disco muda.
+    if (disableMidFlight) stored.cfg = { ...stored.cfg, enabled: false };
+    if (killContext) w.chrome.runtime.id = undefined;
+  }
+
   await new Promise((r) => setTimeout(r, waitMs)); // deixa o fetch resolver + 1 ciclo
 
   // Simula troca de tela: a lista e desmontada e o ciclo roda de novo.
@@ -96,7 +132,7 @@ async function run({ rows, agentName = 'Carlos Lemos', cfg = {}, mutate = null, 
 
   listeners[0]?.({ type: 'zd-status' }, null, (res) => { statusReply = res; });
   dom.window.close();
-  return { clicks, keys, status: statusReply };
+  return { clicks, keys, status: statusReply, stored };
 }
 
 const NFS = 'Suporte Especializado (NFs)';
@@ -195,7 +231,7 @@ function check(label, cond, detail) {
     ]
   });
   check('fila mista (outra fila junto) => NAO dispara', r.keys.length === 0, JSON.stringify(r.keys));
-  check('  e reporta o motivo', /fila mista/.test(r.status?.blindBlocked || ''), JSON.stringify(r.status?.blindBlocked));
+  check('  e reporta o motivo', /trava de fila/.test(r.status?.gateReason || ''), JSON.stringify(r.status?.gateReason));
 
   r = await run({
     cfg: SC,
@@ -251,7 +287,55 @@ function check(label, cond, detail) {
     mutate: (doc) => { doc.querySelector('nav').innerHTML = ''; }
   });
   check('lista desmontada => nao perde o rastreio (carencia)', r.status?.tracked === 1, JSON.stringify(r.status?.tracked));
-  check('  e a contagem de "meus" reflete a tela atual', r.status?.mine === 0, JSON.stringify(r.status?.mine));
+  // Importante: a contagem NAO pode cair a zero quando a lista some, senao
+  // navegar entre telas liberaria o limite e o pull viraria loop.
+  check('  contagem sobrevive via cache (nao zera e libera o limite)', r.status?.mine === 1, JSON.stringify(r.status?.mine));
+  check('  e a fonte indica que veio do cache', /cache/.test(r.status?.mineSourceUsed || ''), JSON.stringify(r.status?.mineSourceUsed));
+
+  console.log('\n--- Travas anti-loop ---');
+
+  const elegivel = () => [row({ name: 'Novo1', queue: NFS, status: 'Novo', pending: true })];
+
+  r = await run({ rows: elegivel(), cfg: { enabled: false } });
+  check('trava desligada => nao puxa', r.clicks.length === 0, JSON.stringify(r.clicks));
+
+  // Disjuntor: ja houve maxChats pulls dentro da janela.
+  r = await run({
+    rows: elegivel(),
+    seed: { recentServes: [Date.now(), Date.now(), Date.now()] }
+  });
+  check('disjuntor cheio (3 pulls na janela) => nao puxa', r.clicks.length === 0, JSON.stringify(r.clicks));
+  check('  e reporta o disjuntor', /disjuntor/.test(r.status?.gateReason || ''), JSON.stringify(r.status?.gateReason));
+
+  // Pulls antigos, fora da janela de 10 min, nao devem contar.
+  r = await run({
+    rows: elegivel(),
+    seed: { recentServes: [Date.now() - 20 * 60000, Date.now() - 15 * 60000, Date.now() - 11 * 60000] }
+  });
+  check('disjuntor com pulls fora da janela => puxa normal', r.clicks.length === 1, JSON.stringify(r.clicks));
+
+  // Lock de outra aba ainda quente.
+  r = await run({
+    rows: elegivel(),
+    seed: { serveLock: { id: 'outra-aba', ts: Date.now() } }
+  });
+  check('lock de outra aba => nao puxa', r.clicks.length === 0, JSON.stringify(r.clicks));
+
+  // Contexto invalidado: o setInterval orfao nao pode continuar puxando.
+  r = await run({ rows: elegivel(), killContext: true });
+  check('contexto invalidado => nao puxa', r.clicks.length === 0, JSON.stringify(r.clicks));
+
+  // Desligar DEPOIS de carregado: o cache em memoria diz enabled:true, mas a
+  // releitura do disco tem que vencer. Era exatamente a falha relatada.
+  r = await run({
+    rows: elegivel(),
+    disableMidFlight: true
+  });
+  check('desligado em voo (cache diz ligado) => nao puxa', r.clicks.length === 0, JSON.stringify(r.clicks));
+
+  // O disjuntor precisa registrar o pull, senao nao segura nada.
+  r = await run({ rows: elegivel() });
+  check('pull bem-sucedido registra no disjuntor', (r.stored?.recentServes || []).length === 1, JSON.stringify(r.stored?.recentServes));
 
   console.log(`\n=== ${pass} passaram, ${fail} falharam ===\n`);
   process.exit(fail ? 1 : 0);

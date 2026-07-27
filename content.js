@@ -1,18 +1,31 @@
 /**
  * Zendesk Auto-Atribuicao — content script
  *
- * REGRA CENTRAL: fail-closed. Um chat so e assumido se as TRES condicoes forem
- * positivamente confirmadas no DOM. Qualquer duvida => nao clica.
+ * OBJETIVO: enquanto a trava estiver habilitada, puxar chat novo da fila
+ * automaticamente ate o limite de simultaneos. Servir atribui o chat para quem
+ * esta logado na aba — nao existe caminho para atribuir a outra pessoa —, entao
+ * "atribuir pro analista logado" e consequencia direta de puxar.
  *
- *   1. FILA    — a linha precisa exibir exatamente "Suporte Especializado (NFs)".
- *                Fila nao confirmada = bloqueado, sempre. Sem excecao, sem modo permissivo.
- *   2. AGENTE  — o usuario logado precisa ser Carlos Lemos. Verificado em
- *                /api/v2/users/me.json (cookie de sessao, GET nao precisa de CSRF),
- *                com fallback no DOM. Nao confirmou => a extensao inteira fica inerte.
- *   3. STATUS  — a linha precisa exibir status "Novo". "Aberto", "Pendente" etc.
- *                sao bloqueados; status nao identificado tambem e bloqueado.
+ * REGRA CENTRAL: fail-closed. Toda condicao precisa ser positivamente
+ * confirmada. Qualquer duvida => nao puxa. Puxar demais e muito pior do que
+ * deixar de puxar: vira loop de atribuicao.
  *
- * Cada bloqueio guarda o motivo, exibido no popup — e assim que se ajusta os seletores.
+ * O QUE DECIDE UM PULL — todas obrigatorias, em ordem:
+ *   1. contexto da extensao vivo    <- instancia orfa se autodestroi
+ *   2. cfg.enabled                  <- reconfirmado NO DISCO antes de agir
+ *   3. agente autorizado
+ *   4. meus chats < cfg.maxChats    <- sem contagem confiavel, NAO puxa
+ *   5. painel de conversas aberto
+ *   6. existe chat esperando na fila
+ *   7. fila e status conferem       <- cfg.strictQueueGate, ligada por padrao
+ *   8. disjuntor: teto de pulls na janela movel, independente do DOM
+ *   9. lock entre abas: so uma instancia puxa por vez
+ *
+ * As tres ultimas existem porque as anteriores dependem de ler o DOM, e o DOM
+ * do Agent Workspace muda a cada tela. O disjuntor e a rede final: mesmo que
+ * toda a deteccao erre junto, ele limita o estrago a maxChats por janela.
+ *
+ * Todo bloqueio guarda o motivo em status.gateReason, exibido no popup.
  */
 (() => {
   'use strict';
@@ -20,33 +33,44 @@
   if (window.__zdAutoAssign) return;
   window.__zdAutoAssign = true;
 
+  const CFG_VERSION = 3;
+
   const DEFAULTS = {
+    cfgVersion: CFG_VERSION,
+
     enabled: true,
     maxChats: 3,
     idleMinutes: 6,
 
-    // --- regra 1: fila
-    queueFilter: 'Suporte Especializado (NFs)',
-    queueMatchMode: 'exact', // 'exact' = um elemento da linha tem esse texto exato
-                             // 'contains' = basta aparecer no texto da linha (mais frouxo)
+    // --- contagem de "meus chats" (o limite depende dela)
+    //   'auto' - lista do DOM quando confiavel, senao a API
+    //   'dom'  - so a lista do DOM
+    //   'api'  - so a busca da API (independe da tela aberta)
+    // Nao existe modo "sem limite": sem contagem confiavel, nao puxa.
+    mineSource: 'auto',
+    mineApiQuery: 'type:ticket assignee:{me} status<solved via:chat',
 
-    // --- regra 2: agente
-    agentName: 'Carlos Lemos',
-
-    // --- regra 3: status
-    allowedStatuses: 'novo',
-
-    // como assumir:
-    //   'shortcut'     - dispara Ctrl+Alt+Q (serve o proximo da fila) [cego]
-    //   'globalButton' - clica em toolbar-serve-chat-button           [cego]
-    //   'rowButton'    - clica no botao "Servir" da linha             [escolhe o chat]
-    serveMethod: 'shortcut',
+    // --- como puxar
+    //   'auto'         - clica no botao da barra; se nao der, dispara o atalho
+    //   'globalButton' - so o botao da barra (toolbar-serve-chat-button)
+    //   'shortcut'     - so o atalho (Ctrl+Alt+Q)
+    //   'rowButton'    - clica no "Servir" da linha (exige a lista no DOM)
+    serveMethod: 'auto',
     shortcut: 'Ctrl+Alt+Q',
 
-    // A lista de conversas so existe no DOM com o painel aberto. Ligando isso,
-    // a extensao abre o painel sozinha quando o contador passa de zero.
-    autoOpenPanel: false,
+    // --- trava de fila/status antes de puxar (ligada: so a fila NFs, so Novo)
+    strictQueueGate: true,
+    queueFilter: 'Suporte Especializado (NFs)',
+    queueMatchMode: 'exact', // 'exact' | 'contains'
+    allowedStatuses: 'novo',
 
+    // --- agente autorizado. Vazio = qualquer analista logado (nao recomendado).
+    agentName: 'Carlos Lemos',
+
+    // --- disjuntor: teto de pulls numa janela movel, independente do DOM
+    breakerMinutes: 10,
+
+    autoOpenPanel: false,
     beep: true,
     debug: false,
 
@@ -59,8 +83,6 @@
 
   const SERVE_WORDS = ['servir', 'serve', 'atender', 'aceitar', 'assumir'];
 
-  // Status conhecidos. Se o texto da linha bate com um destes, ele foi IDENTIFICADO —
-  // e ai a decisao e so comparar com a lista de permitidos.
   const KNOWN_STATUSES = [
     'novo', 'new',
     'aberto', 'open',
@@ -72,8 +94,7 @@
   ];
 
   // O Agent Workspace codifica o status no proprio data-test-id do badge
-  // (data-test-id="status-badge-open"). Isso e MUITO mais confiavel que ler
-  // texto, entao e a primeira tentativa em detectStatus().
+  // (data-test-id="status-badge-open") — mais confiavel que ler texto traduzido.
   const STATUS_BADGE_MAP = {
     new: 'novo',
     open: 'aberto',
@@ -84,7 +105,6 @@
     closed: 'fechado'
   };
 
-  // "novo" e "new" sao equivalentes; idem para os outros pares.
   const STATUS_ALIASES = {
     new: 'novo',
     open: 'aberto',
@@ -96,38 +116,75 @@
     waiting: 'aguardando'
   };
 
+  /**
+   * trusted = e de fato a lista de conversas, entao "linha sem botao Servir"
+   * pode ser contada como chat meu. Seletores frouxos (abas, itens de nav)
+   * casavam com dezenas de elementos de UI e o contador ia a 76/3, o que
+   * estourava o limite e travava o pull. Eles ficaram fora de proposito;
+   * o diagnostico ainda mostra quantos elementos cada um pegaria.
+   */
   const LIST_CANDIDATES = [
-    '[data-test-id="conversation-list-item"]',
-    '[data-test-id*="conversation-list-item"]',
-    '[data-test-id*="chat-list-item"]',
-    '[data-test-id*="omni-log-item"]',
-    '[data-test-id*="conversation"] [role="listitem"]',
-    '[data-garden-id="tabs.tab"]',
-    '[role="tablist"] [role="tab"]',
-    'nav [role="listitem"]'
+    { sel: '[data-test-id="conversation-list-item"]', trusted: true },
+    { sel: '[data-test-id*="conversation-list-item"]', trusted: true },
+    { sel: '[data-test-id*="chat-list-item"]', trusted: true },
+    { sel: '[data-test-id*="omni-log-item"]', trusted: false },
+    { sel: '[data-test-id*="conversation"] [role="listitem"]', trusted: false }
   ];
 
+  // Seletores que NAO entram na deteccao, mas aparecem no diagnostico.
+  const LIST_REJECTED = [
+    '[data-garden-id="tabs.tab"]',
+    '[role="tablist"] [role="tab"]',
+    'nav [role="listitem"]',
+    '[data-test-id="generic-table-row"]'
+  ];
+
+  // Uma lista de conversas nao tem 76 itens. Acima disso o seletor casou com
+  // outra coisa — descarta, em vez de produzir um numero absurdo.
+  const MAX_PLAUSIBLE_ROWS = 30;
+
   const POLL_MS = 1200;
-  const SERVE_COOLDOWN_MS = 4000;
+  const SERVE_COOLDOWN_MS = 5000;
+  const SERVE_FAIL_COOLDOWN_MS = 12000; // cresce por falha consecutiva
+  const SERVE_VERIFY_MS = 7000;         // janela pra confirmar que o pull pegou
   const AGENT_RECHECK_MS = 5 * 60 * 1000;
+  const API_MINE_MS = 15000;
 
   // Carencia antes de esquecer uma conversa que sumiu da lista. Trocar de tela
   // desmonta a lista inteira; sem isso, os timers de silencio zeravam a cada
   // navegacao. 2 min e menor que o alerta de 6, entao nao mascara nada.
   const IDLE_FORGET_MS = 2 * 60 * 1000;
 
-  // Quantas vezes tentar abrir o painel Conversas antes de desistir.
+  // O DOM tambem some ao navegar. Em modo 'auto', a ultima contagem confiavel
+  // vale por esse tempo, pra nao bloquear o pull durante a troca de tela.
+  const DOM_MINE_TTL_MS = 45000;
+
   const PANEL_OPEN_TRIES = 3;
   const PANEL_OPEN_COOLDOWN_MS = 8000;
 
   let cfg = { ...DEFAULTS };
-  let lastServeAt = 0;
-  let listSelectorUsed = '';
   let timerId = null;
   let panelTries = 0;
   let lastPanelTryAt = 0;
+  let stopped = false;
+  let serving = false;
 
-  /** key -> { fp, since, alerted } */
+  // Identidade desta aba, pro lock entre abas. Varias abas do Zendesk abertas
+  // significavam varias instancias puxando em paralelo, cada uma com seu
+  // proprio cooldown em memoria.
+  const INSTANCE_ID = Math.random().toString(36).slice(2) + '-' + Date.now();
+
+  let listInfo = { selector: '', trusted: false, count: 0, rejected: '' };
+  let lastDomMine = { value: null, at: 0 };
+  let apiMine = { count: null, at: 0, error: '', pending: false };
+
+  /** ultima tentativa de pull, pra verificar se realmente pegou */
+  let serveAttempt = null; // { at, method, queueBefore, mineBefore, verified }
+  let lastServe = null;    // { at, method, ok, note }
+  let serveFails = 0;
+  let autoPreferShortcut = false; // vira true quando o botao da barra falha
+
+  /** key -> { fp, since, alerted, missingSince } */
   const chats = new Map();
 
   /** { name, id, source, ok } | null enquanto nao resolvido */
@@ -137,15 +194,24 @@
 
   let status = {
     ok: false,
-    mine: 0,
+    mine: null,
+    mineSourceUsed: '',
+    mineWhy: '',
+    domMine: null,
+    apiMine: null,
     pending: 0,
     eligible: 0,
+    queueWaiting: null,
+    queueFrom: '',
     blocked: [],
-    blindBlocked: '',
+    gateReason: '',
     agent: null,
     listSelectorUsed: '',
+    listTrusted: false,
     lastAction: '',
-    lastActionAt: 0
+    lastActionAt: 0,
+    lastServe: null,
+    serveFails: 0
   };
 
   // ---------------------------------------------------------------- utilitarios
@@ -179,10 +245,10 @@
     return st.visibility !== 'hidden' && st.display !== 'none' && st.opacity !== '0';
   }
 
-  function setAction(text) {
-    status.lastAction = text;
+  function setAction(msg) {
+    status.lastAction = msg;
     status.lastActionAt = Date.now();
-    log(text);
+    log(msg);
   }
 
   /** Elementos-folha: onde o Zendesk costuma colocar badges de fila e status. */
@@ -206,7 +272,7 @@
     return out;
   }
 
-  // ----------------------------------------------- regra 2: identidade do agente
+  // ------------------------------------------------------- identidade do agente
 
   async function resolveAgent() {
     // 1) API do Support. GET com cookie de sessao — nao exige CSRF token.
@@ -253,11 +319,16 @@
       resolveAgent()
         .then((res) => {
           agentCheckedAt = Date.now();
+          const wanted = norm(cfg.agentName);
           if (!res) {
-            agent = { name: null, source: null, ok: false, why: 'nao foi possivel identificar o usuario logado' };
+            // Sem nome exigido nao ha o que conferir: servir atribui pra quem
+            // esta logado de qualquer forma. Com nome exigido, bloqueia.
+            agent = wanted
+              ? { name: null, source: null, ok: false, why: 'nao foi possivel identificar o usuario logado' }
+              : { name: null, source: null, ok: true, why: '' };
             return;
           }
-          const ok = norm(res.name).includes(norm(cfg.agentName));
+          const ok = !wanted || norm(res.name).includes(wanted);
           agent = {
             ...res,
             ok,
@@ -267,7 +338,9 @@
         })
         .catch(() => {
           agentCheckedAt = Date.now();
-          agent = { name: null, source: null, ok: false, why: 'erro ao consultar a identidade' };
+          agent = norm(cfg.agentName)
+            ? { name: null, source: null, ok: false, why: 'erro ao consultar a identidade' }
+            : { name: null, source: null, ok: true, why: '' };
         })
         .finally(() => {
           agentPending = false;
@@ -276,17 +349,17 @@
     return agent;
   }
 
-  // -------------------------------------------------------- regra 1: fila exata
+  // ------------------------------------------------------------- fila (rotulos)
 
   /**
    * Confirma que a linha pertence a fila alvo.
-   * Retorna { ok, detected } — ok=false sempre bloqueia, sem modo permissivo.
+   * Retorna { ok, detected }. Usado pela trava opcional strictQueueGate e pelo
+   * modo rowButton — nos modos cegos nao existe linha pra ler.
    */
   function checkQueue(row) {
     const target = norm(cfg.queueFilter);
     if (!target) return { ok: false, detected: null };
 
-    // Override explicito: le o elemento da fila e compara exatamente.
     if (cfg.queueSelector) {
       let el;
       try {
@@ -310,7 +383,7 @@
     return { ok: false, detected: null };
   }
 
-  // ------------------------------------------------------ regra 3: status "novo"
+  // ----------------------------------------------------------- status (rotulos)
 
   /** Le o status do badge, quando existir: data-test-id="status-badge-open". */
   function statusFromBadge(row) {
@@ -374,41 +447,50 @@
   }
 
   function findRows() {
-    const sels = cfg.listItemSelector ? [cfg.listItemSelector] : LIST_CANDIDATES;
-    for (const sel of sels) {
+    const cands = cfg.listItemSelector
+      ? [{ sel: cfg.listItemSelector, trusted: true }]
+      : LIST_CANDIDATES;
+
+    let rejected = '';
+    for (const c of cands) {
       let found;
       try {
-        found = [...document.querySelectorAll(sel)].filter(isVisible);
+        found = [...document.querySelectorAll(c.sel)].filter(isVisible);
       } catch {
         continue;
       }
-      if (found.length) {
-        listSelectorUsed = sel;
-        return found;
+      if (!found.length) continue;
+      if (found.length > MAX_PLAUSIBLE_ROWS) {
+        rejected = `${c.sel} casou com ${found.length} elementos (> ${MAX_PLAUSIBLE_ROWS}) — descartado`;
+        continue;
       }
+      listInfo = { selector: c.sel, trusted: c.trusted, count: found.length, rejected };
+      return found;
     }
-    listSelectorUsed = '';
+    listInfo = { selector: '', trusted: false, count: 0, rejected };
     return [];
   }
 
   /**
-   * O data-test-id "toolbar-serve-chat-button" e, na verdade, o botao "Conversas"
-   * da barra superior, com o contador embutido no texto ("Conversas\n0") e
-   * desabilitado quando esta zerado. E o unico indicador de chat que existe em
-   * TODAS as telas — a lista some ao navegar, a barra nao.
+   * O data-test-id "toolbar-serve-chat-button" e o botao de chat da barra
+   * superior ("Conversas"/"Atender"), com o contador da fila embutido no texto
+   * e desabilitado quando esta zerado. E o unico indicador que existe em TODAS
+   * as telas — a lista de conversas some ao navegar, a barra nao. E clicar nele
+   * e o caminho mais confiavel pra puxar: clique real, nao evento sintetico.
    */
   function readConversationsButton() {
     const el =
       document.querySelector('[data-test-id="toolbar-serve-chat-button"]') ||
       [...document.querySelectorAll('button, [role="button"]')].find((b) =>
-        /^conversas\b/.test(norm(text(b)))
+        /^(conversas|atender|servir chat|serve chat)\b/.test(norm(text(b)))
       );
     if (!el) return null;
     const m = text(el).match(/\d+/);
     return {
       el,
       count: m ? Number(m[0]) : null,
-      disabled: el.disabled || el.getAttribute('aria-disabled') === 'true'
+      disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
+      visible: isVisible(el)
     };
   }
 
@@ -427,7 +509,75 @@
 
   const fingerprint = (row) => norm(text(row)).replace(/\d+/g, '#');
 
-  // ------------------------------------------------------ disparo do atalho
+  // ------------------------------------------------- contagem de "meus chats"
+
+  /** Busca na API quantos chats ativos estao atribuidos a mim. Estrangulada. */
+  function refreshApiMine() {
+    if (cfg.mineSource !== 'auto' && cfg.mineSource !== 'api') return;
+    if (!agent?.id) return;
+    if (apiMine.pending || Date.now() - apiMine.at < API_MINE_MS) return;
+
+    const query = String(cfg.mineApiQuery || DEFAULTS.mineApiQuery).replace(/\{me\}/g, agent.id);
+    apiMine.pending = true;
+    fetch(`/api/v2/search/count.json?query=${encodeURIComponent(query)}`, {
+      credentials: 'include',
+      headers: { Accept: 'application/json' }
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((j) => {
+        apiMine.at = Date.now();
+        apiMine.error = '';
+        apiMine.count = typeof j?.count === 'number' ? j.count : null;
+      })
+      .catch((e) => {
+        apiMine.at = Date.now();
+        apiMine.error = e.message;
+        apiMine.count = null;
+      })
+      .finally(() => {
+        apiMine.pending = false;
+      });
+  }
+
+  /**
+   * Quantos chats sao meus agora. Devolve { value, source, why }; value null
+   * significa "nao sei" — e nesse caso o pull nao acontece, porque estourar o
+   * limite e pior do que perder um chat.
+   */
+  function resolveMine(domMineRows) {
+    let src = cfg.mineSource || 'auto';
+    if (src === 'off') src = 'auto';
+
+    // 'off' foi removido: era ele que permitia puxar sem limite nenhum.
+    // Config antiga com esse valor cai no comportamento seguro ('auto').
+    const domOk = listInfo.trusted && listInfo.selector;
+    if (domOk) {
+      lastDomMine = { value: domMineRows.length, at: Date.now() };
+    }
+
+    if (src === 'dom') {
+      if (domOk) return { value: domMineRows.length, source: 'dom', why: '' };
+      if (Date.now() - lastDomMine.at < DOM_MINE_TTL_MS && lastDomMine.value !== null) {
+        return { value: lastDomMine.value, source: 'dom (cache)', why: 'lista fora da tela' };
+      }
+      return { value: null, source: 'dom', why: 'lista de conversas nao detectada' };
+    }
+
+    if (src === 'api') {
+      if (apiMine.count !== null) return { value: apiMine.count, source: 'api', why: '' };
+      return { value: null, source: 'api', why: apiMine.error || 'aguardando a API' };
+    }
+
+    // auto
+    if (domOk) return { value: domMineRows.length, source: 'dom', why: '' };
+    if (apiMine.count !== null) return { value: apiMine.count, source: 'api', why: 'lista fora da tela' };
+    if (Date.now() - lastDomMine.at < DOM_MINE_TTL_MS && lastDomMine.value !== null) {
+      return { value: lastDomMine.value, source: 'dom (cache)', why: 'lista fora da tela' };
+    }
+    return { value: null, source: 'auto', why: apiMine.error || 'sem lista no DOM e sem contagem da API' };
+  }
+
+  // ------------------------------------------------------- disparo do atalho
 
   /** "Ctrl+Alt+Q" -> init de KeyboardEvent. So trata teclas de letra. */
   function parseShortcut(str) {
@@ -459,16 +609,16 @@
    * evento despachado aqui chega nos listeners da pagina. O evento vai com
    * isTrusted=false; atalhos de aplicacao tratados em JS respondem normalmente,
    * atalhos nativos do navegador nao (nao e o caso aqui).
+   *
+   * Despacha em UM alvo so (document, onde ficam os handlers globais). Mandar
+   * em varios alvos que borbulham pro document dispararia o handler duas vezes
+   * — e dois pulls seguidos.
    */
   function fireShortcut() {
     const init = parseShortcut(cfg.shortcut);
-    const target =
-      document.activeElement && document.activeElement !== document.body
-        ? document.activeElement
-        : document;
-    for (const type of ['keydown', 'keypress', 'keyup']) {
+    for (const type of ['keydown', 'keyup']) {
       try {
-        target.dispatchEvent(new KeyboardEvent(type, init));
+        document.dispatchEvent(new KeyboardEvent(type, init));
       } catch (e) {
         console.error('[ZD-Auto] falha ao disparar o atalho:', e);
         return false;
@@ -508,9 +658,90 @@
     if (withSound) beep();
   }
 
+  // -------------------------------------------------- travas duras de seguranca
+
+  const store = {
+    get: (keys) =>
+      new Promise((res, rej) => {
+        try {
+          chrome.storage.local.get(keys, (v) => (chrome.runtime.lastError ? rej(new Error(chrome.runtime.lastError.message)) : res(v)));
+        } catch (e) {
+          rej(e);
+        }
+      }),
+    set: (obj) =>
+      new Promise((res, rej) => {
+        try {
+          chrome.storage.local.set(obj, () => (chrome.runtime.lastError ? rej(new Error(chrome.runtime.lastError.message)) : res()));
+        } catch (e) {
+          rej(e);
+        }
+      })
+  };
+
+  /**
+   * Config lida do disco AGORA, nao do cache em memoria. O cache pode estar
+   * congelado (contexto morto) — e foi assim que o botao de desligar deixou de
+   * ser respeitado. Se a leitura falhar, nao puxa.
+   */
+  async function freshCfg() {
+    const res = await store.get('cfg');
+    return { ...DEFAULTS, ...(res?.cfg || {}) };
+  }
+
+  /**
+   * Disjuntor: teto absoluto de pulls numa janela movel, guardado no storage
+   * (portanto compartilhado entre abas) e independente de qualquer leitura de
+   * DOM. Se toda a deteccao falhar junto, isto ainda segura o loop.
+   */
+  async function breakerOk(c) {
+    const now = Date.now();
+    const windowMs = Math.max(1, Number(c.breakerMinutes || 10)) * 60000;
+    const limit = Math.max(1, Number(c.maxChats || 3));
+
+    const res = await store.get('recentServes');
+    const recent = (res?.recentServes || []).filter((t) => now - t < windowMs);
+
+    if (recent.length !== (res?.recentServes || []).length) {
+      await store.set({ recentServes: recent });
+    }
+    status.breakerCount = recent.length;
+    status.breakerLimit = limit;
+
+    if (recent.length >= limit) {
+      status.breaker = `disjuntor: ${recent.length} pull(s) em ${c.breakerMinutes || 10} min (teto ${limit})`;
+      return false;
+    }
+    status.breaker = '';
+    return true;
+  }
+
+  async function recordServe() {
+    const res = await store.get('recentServes');
+    const recent = res?.recentServes || [];
+    recent.push(Date.now());
+    await store.set({ recentServes: recent });
+  }
+
+  /**
+   * Lock entre abas. Sem ele, N abas do Zendesk = N instancias puxando ao
+   * mesmo tempo, cada uma achando que respeitou o proprio cooldown.
+   */
+  async function claimLock(cooldown) {
+    const now = Date.now();
+    const res = await store.get('serveLock');
+    const lock = res?.serveLock;
+    if (lock && now - lock.ts < cooldown) return false;
+
+    await store.set({ serveLock: { id: INSTANCE_ID, ts: now } });
+    await new Promise((r) => setTimeout(r, 80)); // janela pra outra aba escrever
+    const check = await store.get('serveLock');
+    return check?.serveLock?.id === INSTANCE_ID;
+  }
+
   // ------------------------------------------------------------------- decisao
 
-  /** Avalia uma linha pendente contra as regras 1 e 3. */
+  /** Avalia uma linha pendente contra fila e status. */
   function evaluate(row) {
     const q = checkQueue(row);
     if (!q.ok) {
@@ -570,17 +801,111 @@
     }
   }
 
+  /** Tem chat esperando? Botao da barra primeiro; senao, linha com "Servir". */
+  function queueWaiting(conv, pendingRows) {
+    if (conv && conv.visible && !conv.disabled && conv.count !== null && conv.count > 0) {
+      return { has: true, count: conv.count, from: 'barra' };
+    }
+    if (pendingRows.length) {
+      return { has: true, count: pendingRows.length, from: 'lista' };
+    }
+    if (conv && conv.count !== null) {
+      return { has: false, count: conv.count, from: 'barra' };
+    }
+    return { has: false, count: null, from: pendingRows.length ? 'lista' : '' };
+  }
+
+  /**
+   * Confere se o pull anterior realmente pegou: ou a fila diminuiu, ou o numero
+   * de chats meus subiu. Sem isso, um clique que nao surte efeito ficava
+   * invisivel — a extensao "tentava" pra sempre e o popup dizia que assumiu.
+   */
+  function verifyServe(queueNow, mineNow) {
+    if (!serveAttempt || serveAttempt.verified) return;
+    if (Date.now() - serveAttempt.at < SERVE_VERIFY_MS) return;
+
+    const { queueBefore, mineBefore, method } = serveAttempt;
+    const queueDropped = queueBefore !== null && queueNow !== null && queueNow < queueBefore;
+    const mineGrew = mineBefore !== null && mineNow !== null && mineNow > mineBefore;
+    const inconclusive =
+      (queueBefore === null || queueNow === null) && (mineBefore === null || mineNow === null);
+
+    serveAttempt.verified = true;
+
+    if (queueDropped || mineGrew) {
+      serveFails = 0;
+      lastServe = { at: serveAttempt.at, method, ok: true, note: queueDropped ? 'fila diminuiu' : 'meus chats subiram' };
+      return;
+    }
+    if (inconclusive) {
+      lastServe = { at: serveAttempt.at, method, ok: null, note: 'sem numeros pra confirmar' };
+      return;
+    }
+
+    serveFails++;
+    lastServe = { at: serveAttempt.at, method, ok: false, note: `sem efeito (${serveFails}x)` };
+    // No modo auto, alterna o caminho: se o botao nao resolveu, tenta o atalho.
+    if ((cfg.serveMethod || 'auto') === 'auto') autoPreferShortcut = !autoPreferShortcut;
+    setAction(`Tentativa por ${method} sem efeito — proxima via ${nextAutoMethod()}`);
+  }
+
+  function nextAutoMethod() {
+    return autoPreferShortcut ? cfg.shortcut : 'botao da barra';
+  }
+
+  function cooldownMs() {
+    return serveFails ? Math.min(60000, SERVE_FAIL_COOLDOWN_MS * serveFails) : SERVE_COOLDOWN_MS;
+  }
+
+  /** Executa o pull. Retorna { ok, method } | null se nao havia como. */
+  function doServe(conv, eligibleRows, pendingRows) {
+    const method = cfg.serveMethod || 'auto';
+
+    if (method === 'rowButton') {
+      const target = eligibleRows[0] || (cfg.strictQueueGate ? null : pendingRows[0]);
+      if (!target) return null;
+      const btn = serveButtonsIn(target.row || target)[0];
+      if (!btn) return null;
+      btn.click();
+      return { ok: true, method: 'botao da linha', label: target.key || rowKey(target.row || target) };
+    }
+
+    const buttonUsable = conv && conv.visible && !conv.disabled;
+
+    if (method === 'globalButton') {
+      if (!buttonUsable) return null;
+      conv.el.click();
+      return { ok: true, method: 'botao da barra' };
+    }
+
+    if (method === 'shortcut') {
+      if (!fireShortcut()) return null;
+      return { ok: true, method: cfg.shortcut };
+    }
+
+    // auto: botao real primeiro (mais confiavel); atalho quando o botao nao
+    // existe nessa tela, ou quando o botao ja falhou na tentativa anterior.
+    if (buttonUsable && !autoPreferShortcut) {
+      conv.el.click();
+      return { ok: true, method: 'botao da barra' };
+    }
+    if (fireShortcut()) return { ok: true, method: cfg.shortcut };
+    if (buttonUsable) {
+      conv.el.click();
+      return { ok: true, method: 'botao da barra' };
+    }
+    return null;
+  }
+
   function tick() {
     const ag = agentGate();
+    refreshApiMine();
 
     const conv = readConversationsButton();
-
-    // Sempre varre: o popup mostra o status e o alerta de silencio roda
-    // mesmo com a atribuicao automatica desligada.
     const rows = findRows();
 
-    // Sem painel aberto nao existe lista no DOM. Se houver conversa esperando
-    // e nada detectado, tenta abrir — algumas vezes, nao em loop.
+    // Sem painel aberto nao existe lista no DOM. O pull nao depende mais dela,
+    // mas a contagem por DOM e o alerta de silencio dependem.
     if (cfg.autoOpenPanel && conv && conv.count > 0 && !conv.disabled && !rows.length) {
       if (panelTries < PANEL_OPEN_TRIES && Date.now() - lastPanelTryAt > PANEL_OPEN_COOLDOWN_MS) {
         lastPanelTryAt = Date.now();
@@ -591,79 +916,160 @@
     } else if (rows.length) {
       panelTries = 0;
     }
+
     const pending = [];
-    const mine = [];
+    const mineRows = [];
     for (const row of rows) {
       if (serveButtonsIn(row).length) pending.push(row);
-      else mine.push(row);
+      else mineRows.push(row);
     }
 
-    // O alerta de silencio roda mesmo com a atribuicao desligada.
-    trackIdle(mine);
+    // O alerta de silencio roda mesmo com a atribuicao desligada — mas so com
+    // lista confiavel, pra nao rastrear elementos de UI quaisquer.
+    if (listInfo.trusted) trackIdle(mineRows);
 
     const verdicts = pending.map((row) => ({ row, key: rowKey(row), ...evaluate(row) }));
     const eligible = verdicts.filter((v) => v.ok);
 
-    status = {
-      ...status,
-      ok: rows.length > 0,
-      mine: mine.length,
-      pending: pending.length,
-      eligible: eligible.length,
-      blocked: verdicts.filter((v) => !v.ok).slice(0, 5).map((v) => ({ key: v.key, reason: v.reason })),
-      convCount: conv ? conv.count : null,
-      panelOpen: rows.length > 0,
-      tracked: chats.size, // conversas com timer de silencio ativo
-      agent: ag ? { name: ag.name, ok: ag.ok, source: ag.source, why: ag.why } : null,
-      listSelectorUsed
+    const mine = resolveMine(mineRows);
+    const q = queueWaiting(conv, pending);
+
+    verifyServe(conv ? conv.count : null, mine.value);
+
+    const setGate = (reason) => {
+      status.gateReason = reason;
     };
 
-    // --- portao final: tudo precisa estar confirmado
-    if (!cfg.enabled) return;
-    if (!ag) return;                                  // identidade ainda nao resolvida
-    if (!ag.ok) return;                               // regra 2 reprovada => inerte
-    if (mine.length >= Number(cfg.maxChats)) return;  // limite
-    if (Date.now() - lastServeAt < SERVE_COOLDOWN_MS) return;
-    if (!eligible.length) return;
+    status = {
+      ...status,
+      ok: !!(listInfo.selector || conv),
+      mine: mine.value,
+      mineSourceUsed: mine.source,
+      mineWhy: mine.why,
+      domMine: listInfo.trusted ? mineRows.length : null,
+      apiMine: apiMine.count,
+      apiMineError: apiMine.error,
+      pending: pending.length,
+      eligible: eligible.length,
+      queueWaiting: q.count,
+      queueHas: q.has,
+      queueFrom: q.from,
+      convFound: !!conv,
+      convDisabled: conv ? conv.disabled : null,
+      panelOpen: rows.length > 0,
+      tracked: chats.size,
+      blocked: verdicts.filter((v) => !v.ok).slice(0, 5).map((v) => ({ key: v.key, reason: v.reason })),
+      agent: ag ? { name: ag.name, ok: ag.ok, source: ag.source, why: ag.why } : null,
+      listSelectorUsed: listInfo.selector,
+      listTrusted: listInfo.trusted,
+      listRejected: listInfo.rejected,
+      lastServe,
+      serveFails
+    };
 
-    const method = cfg.serveMethod || 'shortcut';
+    // ----------------------------------------------------------- portao final
+    if (stopped) return setGate('instancia parada — recarregue a pagina (F5)');
+    if (!contextAlive()) {
+      selfDestruct('contexto invalidado');
+      return setGate('instancia parada — recarregue a pagina (F5)');
+    }
+    if (!cfg.enabled) return setGate('trava desligada — nao puxa');
+    if (!ag) return setGate('verificando a identidade do analista');
+    if (!ag.ok) return setGate(`agente nao autorizado: ${ag.why}`);
 
-    // Modo com escolha: clica no botao da propria linha ja aprovada.
-    if (method === 'rowButton') {
-      const target = eligible[0];
-      const btn = serveButtonsIn(target.row)[0];
-      if (!btn) return;
-      lastServeAt = Date.now();
-      const label = target.key || 'chat da fila';
-      btn.click();
-      setAction(`Assumido: ${label}`);
-      notify('Chat assumido', `${label} — ${cfg.queueFilter}`, false);
-      return;
+    // O limite e inegociavel: sem contagem confiavel, nao puxa. A opcao "off"
+    // foi removida — era ela que permitia puxar sem limite nenhum.
+    if (mine.value === null) return setGate(`nao sei quantos chats sao meus (${mine.why})`);
+    if (mine.value >= Number(cfg.maxChats)) {
+      return setGate(`limite atingido: ${mine.value}/${cfg.maxChats}`);
     }
 
-    // Modos cegos (atalho e botao global): a acao serve "o proximo da fila",
-    // sem escolher qual. So e seguro se TODOS os pendentes forem elegiveis —
-    // com um unico fora da regra, o proximo poderia ser justamente ele.
-    if (eligible.length !== pending.length) {
-      status.blindBlocked =
-        `fila mista: ${pending.length - eligible.length} de ${pending.length} pendente(s) fora da regra`;
-      return;
-    }
-    status.blindBlocked = '';
-
-    if (method === 'globalButton') {
-      const gb = document.querySelector('[data-test-id="toolbar-serve-chat-button"]');
-      if (!gb || !isVisible(gb) || gb.disabled || gb.getAttribute('aria-disabled') === 'true') return;
-      lastServeAt = Date.now();
-      gb.click();
-      setAction('Assumido pelo botao global');
-    } else {
-      lastServeAt = Date.now();
-      if (!fireShortcut()) return;
-      setAction(`Assumido via ${cfg.shortcut}`);
+    // Exigencia explicita: so puxa com a tela de conversas aberta.
+    if (!rows.length) {
+      return setGate('painel de conversas fechado — abra para puxar');
     }
 
-    notify('Chat assumido', `${pending.length} elegivel(is) — ${cfg.queueFilter}`, false);
+    if (serveAttempt && !serveAttempt.verified) {
+      return setGate('confirmando o pull anterior');
+    }
+    if (Date.now() - (serveAttempt?.at || 0) < cooldownMs()) {
+      return setGate('em espera (cooldown)');
+    }
+
+    if (!q.has) {
+      return setGate(
+        conv || pending.length
+          ? 'nenhum chat esperando na fila'
+          : 'nao achei o botao de chat da barra nem lista de conversas'
+      );
+    }
+
+    // Trava opcional: so puxa se a fila/status derem pra ler e baterem. Nos
+    // modos cegos isso exige que TODOS os pendentes sejam elegiveis, porque a
+    // acao serve "o proximo" sem escolher qual.
+    if (cfg.strictQueueGate && (cfg.serveMethod || 'auto') !== 'rowButton') {
+      if (!pending.length) {
+        return setGate('trava de fila ligada, mas a lista nao mostra os pendentes');
+      }
+      if (eligible.length !== pending.length) {
+        return setGate(
+          `trava de fila: ${pending.length - eligible.length} de ${pending.length} pendente(s) fora da regra`
+        );
+      }
+    }
+    if (cfg.strictQueueGate && (cfg.serveMethod || 'auto') === 'rowButton' && !eligible.length) {
+      return setGate('trava de fila: nenhum pendente elegivel');
+    }
+
+    // A partir daqui e assincrono: reconfirma tudo no disco antes de agir.
+    if (serving) return setGate('confirmando…');
+    serving = true;
+    setGate('confirmando…');
+
+    (async () => {
+      try {
+        // 1. Config do disco. Se o botao foi desligado, para aqui — mesmo que
+        //    o cache em memoria ainda diga o contrario.
+        const c = await freshCfg();
+        if (!c.enabled) return setGate('trava desligada — nao puxa');
+        if (mine.value >= Number(c.maxChats)) {
+          return setGate(`limite atingido: ${mine.value}/${c.maxChats}`);
+        }
+
+        // 2. Disjuntor: teto absoluto, independente de qualquer leitura de tela.
+        if (!(await breakerOk(c))) return setGate(status.breaker);
+
+        // 3. Lock entre abas: so uma instancia puxa por vez.
+        if (!(await claimLock(cooldownMs()))) {
+          return setGate('outra aba esta puxando');
+        }
+
+        const res = doServe(conv, eligible, pending);
+        if (!res) {
+          return setGate('nao ha caminho pra puxar nesta tela (sem botao, sem linha)');
+        }
+
+        await recordServe();
+        serveAttempt = {
+          at: Date.now(),
+          method: res.method,
+          queueBefore: conv ? conv.count : null,
+          mineBefore: mine.value,
+          verified: false
+        };
+        setGate('');
+      } catch (e) {
+        // Leitura de storage falhando = contexto morto. Nao puxa.
+        selfDestruct(`falha ao ler a config: ${e.message}`);
+        setGate('instancia parada — recarregue a pagina (F5)');
+      } finally {
+        serving = false;
+      }
+    })();
+    return;
+    const label = res.label ? `: ${res.label}` : '';
+    setAction(`Puxado via ${res.method}${label}`);
+    notify('Chat assumido', `Puxado via ${res.method}${label}`, false);
   }
 
   function loop() {
@@ -678,30 +1084,30 @@
 
   /** Panorama da tela: onde estamos e quais controles de chat existem. */
   function probeEnvironment() {
-    const serveBtn = document.querySelector('[data-test-id="toolbar-serve-chat-button"]');
-    const convBtn = [...document.querySelectorAll('button, [role="button"]')].find((b) =>
-      /^conversas\b/.test(norm(text(b)))
-    );
+    const conv = readConversationsButton();
     const path = location.pathname;
     return [
       `tela: ${path.includes('/filters/') ? 'views/tickets' : path.includes('chat') ? 'chat' : path}`,
-      `botao global "Servir chat": ${
-        serveBtn
-          ? `PRESENTE | texto=${JSON.stringify((serveBtn.innerText || serveBtn.getAttribute('aria-label') || '').trim())}` +
-            ` | disabled=${serveBtn.disabled || serveBtn.getAttribute('aria-disabled') === 'true'}` +
-            ` | visivel=${isVisible(serveBtn)}`
-          : 'ausente'
+      `botao de chat da barra: ${
+        conv
+          ? `PRESENTE | texto=${JSON.stringify(text(conv.el).replace(/\s+/g, ' ').trim())}` +
+            ` | contador=${conv.count} | disabled=${conv.disabled} | visivel=${conv.visible}`
+          : 'AUSENTE (sem ele, so o atalho ou a linha da lista servem pra puxar)'
       }`,
-      `painel Conversas: ${convBtn ? JSON.stringify(convBtn.innerText.replace(/\s+/g, ' ').trim()) : '(botao nao encontrado)'}`,
-      `linhas de tabela de tickets (generic-table-row): ${document.querySelectorAll('[data-test-id="generic-table-row"]').length}`
+      `linhas de tabela de tickets (generic-table-row): ${document.querySelectorAll('[data-test-id="generic-table-row"]').length}`,
+      `metodo em uso: ${cfg.serveMethod} | proxima via: ${nextAutoMethod()} | falhas seguidas: ${serveFails}`,
+      `ultimo pull: ${
+        lastServe
+          ? `${lastServe.method} — ${lastServe.ok === true ? 'CONFIRMADO' : lastServe.ok === false ? 'SEM EFEITO' : 'INCONCLUSIVO'} (${lastServe.note})`
+          : '(nenhum)'
+      }`,
+      `motivo atual: ${status.gateReason || '(nenhum — livre pra puxar)'}`
     ];
   }
 
   /**
    * Despeja as celulas da tabela de views. Serve pra descobrir QUAL custom field
    * carrega a fila/categoria — os data-test-id vem numerados, sem nome legivel.
-   * Essa tabela NAO entra em LIST_CANDIDATES de proposito: linhas de ticket nao
-   * tem botao "Servir" e seriam contadas como chats meus, travando o limite.
    */
   function dumpTableRows(limit = 3) {
     const rows = [...document.querySelectorAll('[data-test-id="generic-table-row"]')]
@@ -725,24 +1131,25 @@
   }
 
   /**
-   * Sonda a API de busca. Objetivo: achar uma consulta que conte os chats ativos
-   * do Carlos sem depender do DOM — o DOM zera a cada troca de tela, a API nao.
-   * Compare os numeros com a realidade da tela pra escolher a consulta certa.
+   * Sonda a API de busca. Objetivo: achar a consulta que conta os chats ativos
+   * do analista sem depender do DOM. Compare os numeros com a realidade da tela
+   * e cole a vencedora em "Consulta da API" no popup.
    */
   async function probeApi() {
     if (!agent?.id) return ['  (id do agente nao resolvido — sem sondagem)'];
 
     const queries = [
+      String(cfg.mineApiQuery || DEFAULTS.mineApiQuery).replace(/\{me\}/g, agent.id),
       `type:ticket assignee:${agent.id} status<solved`,
       `type:ticket assignee:${agent.id} status:new`,
       `type:ticket assignee:${agent.id} status:open`,
       `type:ticket assignee:${agent.id} status:pending`,
-      `type:ticket assignee:${agent.id} status<solved via:chat`,
+      `type:ticket assignee:${agent.id} status:open via:chat`,
       `type:ticket status:new group:"${cfg.queueFilter}"`
     ];
 
     const out = [];
-    for (const q of queries) {
+    for (const q of [...new Set(queries)]) {
       try {
         const r = await fetch(`/api/v2/search/count.json?query=${encodeURIComponent(q)}`, {
           credentials: 'include',
@@ -781,6 +1188,14 @@
     }
   }
 
+  function countSel(sel) {
+    try {
+      return [...document.querySelectorAll(sel)].filter(isVisible).length;
+    } catch {
+      return 0;
+    }
+  }
+
   async function diagnose() {
     const testIds = new Map();
     document.querySelectorAll('[data-test-id]').forEach((el) => {
@@ -794,13 +1209,12 @@
       .map((el) => (el.innerText || el.getAttribute('aria-label') || '').trim())
       .filter((t) => t && t.length <= 30);
 
-    const candidates = LIST_CANDIDATES.map((sel) => {
-      let n = 0;
-      try {
-        n = [...document.querySelectorAll(sel)].filter(isVisible).length;
-      } catch {}
-      return `${String(n).padStart(3)}  ${sel}`;
-    });
+    const candidates = [
+      ...LIST_CANDIDATES.map(
+        (c) => `${String(countSel(c.sel)).padStart(3)}  ${c.trusted ? '[conta como meus]' : '[so informativo]'}  ${c.sel}`
+      ),
+      ...LIST_REJECTED.map((sel) => `${String(countSel(sel)).padStart(3)}  [FORA da deteccao]  ${sel}`)
+    ];
 
     const rows = findRows().slice(0, 8).map((r, i) => {
       const pend = serveButtonsIn(r).length > 0;
@@ -817,13 +1231,16 @@
     return [
       '=== Zendesk Auto-Atribuicao — diagnostico ===',
       `url: ${location.href}`,
-      `agente: ${agent ? `${agent.name} (${agent.source}) ok=${agent.ok}` : '(nao resolvido)'}`,
-      `fila alvo: "${cfg.queueFilter}" | modo: ${cfg.queueMatchMode}`,
-      `metodo: ${cfg.serveMethod} ${cfg.serveMethod === 'shortcut' ? `(${cfg.shortcut})` : ''}` +
-        `${cfg.serveMethod !== 'rowButton' ? ' [cego: exige TODOS os pendentes elegiveis]' : ''}`,
-      `status permitidos: ${allowedStatusList().join(', ')}`,
-      `seletor de lista em uso: ${listSelectorUsed || '(NENHUM CASOU)'}`,
-      `meus: ${status.mine} | pendentes: ${status.pending} | elegiveis: ${status.eligible}`,
+      `trava: ${cfg.enabled ? 'HABILITADA (puxa automatico)' : 'DESLIGADA (nao puxa)'}`,
+      `agente: ${agent ? `${agent.name ?? '(nome nao lido)'} (${agent.source}) ok=${agent.ok}` : '(nao resolvido)'}` +
+        ` | exigido: ${cfg.agentName ? JSON.stringify(cfg.agentName) : '(qualquer analista logado)'}`,
+      `limite: ${status.mine ?? '?'} / ${cfg.maxChats}  (fonte: ${status.mineSourceUsed}${status.mineWhy ? ' — ' + status.mineWhy : ''})`,
+      `  meus por DOM: ${status.domMine ?? '(indisponivel)'} | meus por API: ${apiMine.count ?? '(indisponivel)'}${apiMine.error ? ' erro=' + apiMine.error : ''}`,
+      `  consulta da API: ${String(cfg.mineApiQuery).replace(/\{me\}/g, agent?.id ?? '{me}')}`,
+      `fila esperando: ${status.queueWaiting ?? '?'} (fonte: ${status.queueFrom || 'nenhuma'})`,
+      `trava de fila/status: ${cfg.strictQueueGate ? `LIGADA — so "${cfg.queueFilter}" / ${allowedStatusList().join(', ')}` : 'desligada (puxa o proximo da fila sem checar antes)'}`,
+      `seletor de lista em uso: ${listInfo.selector || '(NENHUM CASOU)'}${listInfo.trusted ? '' : ' [nao confiavel pra contar]'}`,
+      listInfo.rejected ? `descartado: ${listInfo.rejected}` : '',
       '',
       '--- panorama do ambiente ---',
       ...probeEnvironment().map((l) => '  ' + l),
@@ -851,7 +1268,9 @@
       '',
       '--- textos de botoes visiveis (unicos) ---',
       ...[...new Set(buttons)].slice(0, 60).map((t) => `  "${t}"`)
-    ].join('\n');
+    ]
+      .filter((l) => l !== '')
+      .join('\n');
   }
 
   window.__zdDiag = diagnose;
@@ -874,9 +1293,37 @@
 
   // ------------------------------------------------------------------- arranque
 
+  /**
+   * Ao recarregar a extensao sem dar F5 na aba, o content script ANTIGO continua
+   * vivo: o setInterval segue rodando, mas chrome.storage.onChanged nunca mais
+   * dispara. Resultado: uma instancia orfa puxando chat com a config congelada
+   * em enabled:true, imune ao botao do popup. Era essa a causa de "nao respeita
+   * o botao de atribuir". Sintoma no console: chrome-extension://invalid/.
+   *
+   * chrome.runtime.id fica undefined quando o contexto morre.
+   */
+  function contextAlive() {
+    try {
+      return !!(chrome.runtime && chrome.runtime.id);
+    } catch {
+      return false;
+    }
+  }
+
+  function selfDestruct(motivo) {
+    if (timerId) clearInterval(timerId);
+    timerId = null;
+    stopped = true;
+    console.warn(`[ZD-Auto] instancia parada: ${motivo}. Recarregue a pagina (F5).`);
+  }
+
   function start() {
     if (timerId) clearInterval(timerId);
-    timerId = setInterval(loop, POLL_MS);
+    timerId = setInterval(() => {
+      if (stopped) return;
+      if (!contextAlive()) return selfDestruct('contexto da extensao invalidado');
+      loop();
+    }, POLL_MS);
     loop();
   }
 
@@ -892,6 +1339,9 @@
     chats.clear();
     agent = null;          // reavalia a identidade se o nome do agente mudou
     agentCheckedAt = 0;
+    apiMine = { count: null, at: 0, error: '', pending: false };
+    serveFails = 0;
+    autoPreferShortcut = false;
     log('config atualizada', cfg);
   });
 })();
