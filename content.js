@@ -54,6 +54,10 @@
     // Telas onde pode puxar. Vazio = qualquer /agent/.
     allowedPaths: '',
 
+    // Views (filas) de onde pode puxar, por id do path /agent/filters/<id>.
+    // A view E a fila: garantia mais forte que casar texto na linha.
+    allowedViewIds: '21225438247447',
+
     // --- como puxar
     //   'auto'         - clica no botao da barra; se nao der, dispara o atalho
     //   'globalButton' - so o botao da barra (toolbar-serve-chat-button)
@@ -528,6 +532,70 @@
     return path.startsWith('/agent/');
   }
 
+  // ------------------------------------------- fila pela tabela da view (/agent/filters)
+
+  /**
+   * Na pratica a fila e a TABELA DE VIEW, nao o painel de conversas: cada chat
+   * aparece como um ticket "Conversa com X" com status e responsavel legiveis.
+   *
+   *   status-badge-new + assignee "-"  => disponivel pra puxar
+   *   assignee == meu nome             => ja e meu
+   *
+   * E a fila e a PROPRIA VIEW: todo ticket da tabela pertence a ela por
+   * definicao. Conferir o id da view no path e uma garantia mais forte do que
+   * casar texto — os custom fields de categoria vem vazios nessas linhas.
+   */
+  const VIEW_ROW_SEL = '[data-test-id="generic-table-row"]';
+  const UNASSIGNED = ['', '-', '—', '–'];
+
+  function currentViewId() {
+    const m = location.pathname.match(/\/agent\/filters\/(\d+)/);
+    return m ? m[1] : null;
+  }
+
+  function viewAllowed() {
+    const id = currentViewId();
+    if (!id) return false;
+    const allow = String(cfg.allowedViewIds || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return allow.length ? allow.includes(id) : true;
+  }
+
+  function viewRowInfo(row) {
+    const cell = (id) => row.querySelector(`[data-test-id="${id}"]`);
+    const assignee = text(cell('ticket-table-cells-assignee')).trim();
+    const idTxt = text(cell('generic-table-cells-id')).replace(/\D/g, '');
+    return {
+      row,
+      id: idTxt || null,
+      subject: text(cell('ticket-table-cells-subject')).trim(),
+      assignee,
+      unassigned: UNASSIGNED.includes(assignee),
+      status: detectStatus(row)
+    };
+  }
+
+  function scanView() {
+    const rows = [...document.querySelectorAll(VIEW_ROW_SEL)].filter(isVisible);
+    if (!rows.length) return { on: false, rows: [], mine: null, avail: [] };
+
+    const infos = rows.map(viewRowInfo);
+    const me = norm(cfg.agentName || agent?.name || '');
+    const allowed = allowedStatusList();
+
+    return {
+      on: true,
+      viewId: currentViewId(),
+      allowed: viewAllowed(),
+      rows: infos,
+      // So conta se souber o nome — senao "0 meus" liberaria o limite.
+      mine: me ? infos.filter((i) => norm(i.assignee) === me).length : null,
+      avail: infos.filter((i) => i.unassigned && allowed.includes(i.status))
+    };
+  }
+
   // ------------------------------------------------- contagem de "meus chats"
 
   /** Busca na API quantos chats ativos estao atribuidos a mim. Estrangulada. */
@@ -563,9 +631,15 @@
    * significa "nao sei" — e nesse caso o pull nao acontece, porque estourar o
    * limite e pior do que perder um chat.
    */
-  function resolveMine(domMineRows, conv) {
+  function resolveMine(domMineRows, conv, view) {
     let src = cfg.mineSource || 'auto';
     if (src === 'off') src = 'auto';
+
+    if (src === 'view') {
+      return view?.mine === null || view?.mine === undefined
+        ? { value: null, source: 'view', why: 'tabela da view fora da tela ou agente sem nome' }
+        : { value: view.mine, source: 'view', why: '' };
+    }
 
     // Contador do botao "Conversas" da barra: e o unico numero de chat presente
     // em TODAS as telas do workspace, entao nao some ao navegar.
@@ -831,7 +905,14 @@
   }
 
   /** Tem chat esperando? Botao da barra primeiro; senao, linha com "Servir". */
-  function queueWaiting(conv, pendingRows) {
+  function queueWaiting(conv, pendingRows, view) {
+    // A tabela da view vem primeiro: ela lista os chats de verdade, com status
+    // e responsavel. O contador da barra marca 0 mesmo havendo chat novo na
+    // fila (ele conta sessao de chat ao vivo, nao ticket) — era ele que
+    // bloqueava com "nenhum chat esperando".
+    if (view && view.on) {
+      return { has: view.avail.length > 0, count: view.avail.length, from: 'view' };
+    }
     if (conv && conv.visible && !conv.disabled && conv.count !== null && conv.count > 0) {
       return { has: true, count: conv.count, from: 'barra' };
     }
@@ -960,8 +1041,9 @@
     const verdicts = pending.map((row) => ({ row, key: rowKey(row), ...evaluate(row) }));
     const eligible = verdicts.filter((v) => v.ok);
 
-    const mine = resolveMine(mineRows, conv);
-    const q = queueWaiting(conv, pending);
+    const view = scanView();
+    const mine = resolveMine(mineRows, conv, view);
+    const q = queueWaiting(conv, pending, view);
 
     verifyServe(conv ? conv.count : null, mine.value);
 
@@ -979,6 +1061,11 @@
       apiMine: apiMine.count,
       apiMineError: apiMine.error,
       barMine: conv && Number.isFinite(conv.count) ? conv.count : null,
+      viewOn: view.on,
+      viewId: view.viewId || null,
+      viewAllowed: view.on ? view.allowed : null,
+      viewMine: view.mine,
+      viewAvail: view.on ? view.avail.map((i) => `#${i.id} ${i.subject}`).slice(0, 5) : [],
       apiQueryUsed: String(cfg.mineApiQuery || '').replace(/\{me\}/g, agent?.id ?? '{me}'),
       screenOk: onAllowedScreen(),
       path: location.pathname,
@@ -1042,7 +1129,16 @@
     // Trava opcional: so puxa se a fila/status derem pra ler e baterem. Nos
     // modos cegos isso exige que TODOS os pendentes sejam elegiveis, porque a
     // acao serve "o proximo" sem escolher qual.
-    if (cfg.strictQueueGate && (cfg.serveMethod || 'auto') !== 'rowButton') {
+    // Fila pela view: o id do path identifica a fila sem ambiguidade, e os
+    // candidatos ja vem filtrados por "sem responsavel + status permitido".
+    if (view.on) {
+      if (cfg.strictQueueGate && !view.allowed) {
+        return setGate(`view ${view.viewId} nao esta na lista de filas permitidas`);
+      }
+      if (!view.avail.length) return setGate('nenhum chat novo sem responsavel na fila');
+    }
+
+    if (cfg.strictQueueGate && !view.on && (cfg.serveMethod || 'auto') !== 'rowButton') {
       if (!pending.length) {
         return setGate('trava de fila ligada, mas a lista nao mostra os pendentes');
       }

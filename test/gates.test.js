@@ -376,6 +376,67 @@ function check(label, cond, detail) {
   r = await run({ rows: elegivel(), bar: 2, cfg: { mineSource: 'bar' } });
   check('barra reportada no status', r.status?.barMine === 2, JSON.stringify(r.status?.barMine));
 
+  console.log('\n--- Fila pela tabela da view (estrutura real do diagnostico) ---');
+
+  // Reproduz exatamente as linhas capturadas em beteltecnologia.zendesk.com
+  const vrow = ({ id, subject, badge, assignee }) => `
+    <div data-test-id="generic-table-row">
+      <span data-test-id="status-badge-${badge}">•</span>
+      <span data-test-id="ticket-table-cells-custom-status">${badge === 'new' ? 'Novo' : 'Aberto'}</span>
+      <span data-test-id="generic-table-cells-id">#${id}</span>
+      <span data-test-id="ticket-table-cells-subject">${subject}</span>
+      <span data-test-id="ticket-table-cells-assignee">${assignee}</span>
+      <span data-test-id="ticket-table-cells-custom-field-360032624354"></span>
+    </div>`;
+
+  const VIEW_URL = 'https://acme.zendesk.com/agent/filters/21225438247447';
+  const realView = [
+    vrow({ id: 1044095, subject: 'Conversa com Vanderlei', badge: 'new', assignee: '-' }),
+    vrow({ id: 1044082, subject: 'Conversa com NAYANE', badge: 'open', assignee: 'Carlos Lemos' }),
+    vrow({ id: 1044085, subject: 'Conversa com SILVIO', badge: 'open', assignee: 'João Pedro Vianey' })
+  ];
+
+  const vcfg = { mineSource: 'view', serveMethod: 'rowButton', allowedViewIds: '21225438247447' };
+
+  r = await run({ rows: realView, url: VIEW_URL, cfg: vcfg, bar: 0 });
+  check('conta 1 chat meu pelo responsavel', r.status?.viewMine === 1, JSON.stringify(r.status?.viewMine));
+  check('ve 1 disponivel (novo + sem responsavel)', r.status?.queueWaiting === 1, JSON.stringify(r.status?.queueWaiting));
+  check('  e identifica qual', /1044095/.test(JSON.stringify(r.status?.viewAvail)), JSON.stringify(r.status?.viewAvail));
+  check('barra=0 nao bloqueia mais a fila', !/nenhum chat esperando/.test(r.status?.gateReason || ''), JSON.stringify(r.status?.gateReason));
+
+  // Ticket de outro analista nao pode ser contado nem puxado.
+  r = await run({
+    rows: [vrow({ id: 1, subject: 'Conversa com X', badge: 'open', assignee: 'João Pedro Vianey' })],
+    url: VIEW_URL, cfg: vcfg, bar: 0
+  });
+  check('ticket de outro analista => nao conta como meu', r.status?.viewMine === 0, JSON.stringify(r.status?.viewMine));
+  check('  nem como disponivel', r.status?.queueWaiting === 0, JSON.stringify(r.status?.queueWaiting));
+
+  // Aberto e sem responsavel: nao e "novo", nao pode ser tocado.
+  r = await run({
+    rows: [vrow({ id: 2, subject: 'Conversa com Y', badge: 'open', assignee: '-' })],
+    url: VIEW_URL, cfg: vcfg, bar: 0
+  });
+  check('aberto sem responsavel => nao disponivel (so novo)', r.status?.queueWaiting === 0, JSON.stringify(r.status?.queueWaiting));
+
+  // View fora da lista permitida.
+  r = await run({
+    rows: realView, url: 'https://acme.zendesk.com/agent/filters/999', cfg: vcfg, bar: 0
+  });
+  check('view nao permitida => bloqueia', /nao esta na lista de filas permitidas/.test(r.status?.gateReason || ''), JSON.stringify(r.status?.gateReason));
+
+  // Limite pela contagem da view.
+  r = await run({
+    rows: [
+      vrow({ id: 1, subject: 'A', badge: 'open', assignee: 'Carlos Lemos' }),
+      vrow({ id: 2, subject: 'B', badge: 'open', assignee: 'Carlos Lemos' }),
+      vrow({ id: 3, subject: 'C', badge: 'open', assignee: 'Carlos Lemos' }),
+      vrow({ id: 4, subject: 'D', badge: 'new', assignee: '-' })
+    ],
+    url: VIEW_URL, cfg: { ...vcfg, maxChats: 3 }, bar: 0
+  });
+  check('3 meus na view com limite 3 => bloqueia', /limite atingido: 3\/3/.test(r.status?.gateReason || ''), JSON.stringify(r.status?.gateReason));
+
   console.log(`\n=== ${pass} passaram, ${fail} falharam ===\n`);
   process.exit(fail ? 1 : 0);
 })();
