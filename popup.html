@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    width: 340px; margin: 0; padding: 14px;
+    font: 13px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif;
+    background: Canvas; color: CanvasText;
+  }
+  h1 { font-size: 13px; margin: 0 0 10px; }
+  .card {
+    border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+    border-radius: 8px; padding: 9px 10px; margin-bottom: 10px;
+  }
+  .card.bad { border-color: #d4593a; }
+  .card.good { border-color: #2b8a3e; }
+  .row { display: flex; justify-content: space-between; gap: 10px; }
+  .row + .row { margin-top: 3px; }
+  .row > span:last-child { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .muted { opacity: .65; font-size: 11.5px; font-weight: 400 !important; }
+  .gate { display: flex; gap: 7px; align-items: baseline; }
+  .gate + .gate { margin-top: 5px; }
+  .mark { width: 13px; flex: none; font-weight: 700; }
+  .yes { color: #2b8a3e; }
+  .no  { color: #d4593a; }
+  .wait{ opacity: .5; }
+  .gate div { font-size: 11.5px; }
+  ul#blocked { margin: 6px 0 0; padding-left: 16px; font-size: 11.5px; opacity: .8; }
+  ul#blocked li { margin-bottom: 2px; }
+  label { display: block; margin-bottom: 9px; }
+  label > span { display: block; margin-bottom: 3px; }
+  input[type=text], input[type=number], select {
+    width: 100%; box-sizing: border-box; padding: 5px 7px;
+    border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+    border-radius: 6px; background: Field; color: FieldText; font: inherit;
+  }
+  .check { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+  .check input { margin: 0; }
+  .check label { margin: 0; }
+  button {
+    width: 100%; padding: 7px; border-radius: 6px; font: inherit; cursor: pointer;
+    border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+    background: color-mix(in srgb, CanvasText 8%, Canvas); color: CanvasText;
+  }
+  button.primary { background: #03363d; color: #fff; border-color: #03363d; }
+  button + button { margin-top: 6px; }
+  hr { border: 0; border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent); margin: 12px 0; }
+  details summary { cursor: pointer; font-size: 12px; opacity: .8; }
+  details > *:not(summary) { margin-top: 8px; }
+  #msg { margin-top: 8px; font-size: 11.5px; min-height: 14px; opacity: .8; }
+</style>
+</head>
+<body>
+  <h1>Zendesk — Auto-Atribuição</h1>
+
+  <div class="card" id="gates">
+    <div class="gate">
+      <span class="mark wait" id="g1-mark">•</span>
+      <div><b>Fila</b> — <span id="g1">…</span></div>
+    </div>
+    <div class="gate">
+      <span class="mark wait" id="g2-mark">•</span>
+      <div><b>Agente</b> — <span id="g2">verificando…</span></div>
+    </div>
+    <div class="gate">
+      <span class="mark wait" id="g3-mark">•</span>
+      <div><b>Status</b> — <span id="g3">…</span></div>
+    </div>
+  </div>
+
+  <div class="card" id="status">
+    <div class="row"><span>Chats meus</span><span id="s-mine">–</span></div>
+    <div class="row"><span>Pendentes (todas as filas)</span><span id="s-pending">–</span></div>
+    <div class="row"><span>Elegíveis pelas 3 regras</span><span id="s-eligible">–</span></div>
+    <div class="row"><span class="muted" id="s-note">Aguardando a aba do Zendesk…</span></div>
+    <ul id="blocked"></ul>
+  </div>
+
+  <div class="check">
+    <input type="checkbox" id="enabled">
+    <label for="enabled">Atribuição automática ligada</label>
+  </div>
+
+  <label>
+    <span>Limite de chats simultâneos</span>
+    <input type="number" id="maxChats" min="1" max="20" step="1">
+  </label>
+
+  <label>
+    <span>Alertar após (minutos sem resposta)</span>
+    <input type="number" id="idleMinutes" min="1" max="60" step="1">
+  </label>
+
+  <hr>
+
+  <label>
+    <span>Fila permitida (única)</span>
+    <input type="text" id="queueFilter">
+  </label>
+
+  <label>
+    <span>Correspondência da fila</span>
+    <select id="queueMatchMode">
+      <option value="exact">Exata — o rótulo tem que ser idêntico (recomendado)</option>
+      <option value="contains">Contém — aceita o nome em qualquer parte da linha</option>
+    </select>
+  </label>
+
+  <label>
+    <span>Agente autorizado</span>
+    <input type="text" id="agentName">
+  </label>
+
+  <label>
+    <span>Status permitidos (separados por vírgula)</span>
+    <input type="text" id="allowedStatuses" placeholder="novo">
+  </label>
+
+  <div class="check">
+    <input type="checkbox" id="beep">
+    <label for="beep">Som no alerta de silêncio</label>
+  </div>
+
+  <button class="primary" id="save">Salvar</button>
+  <div id="msg"></div>
+
+  <hr>
+
+  <details>
+    <summary>Ajuste fino / diagnóstico</summary>
+    <div class="check">
+      <input type="checkbox" id="debug">
+      <label for="debug">Log no console da página</label>
+    </div>
+    <label>
+      <span>Seletor dos itens da lista</span>
+      <input type="text" id="listItemSelector" placeholder="vazio = detecção automática">
+    </label>
+    <label>
+      <span>Seletor do botão Servir</span>
+      <input type="text" id="serveSelector" placeholder="vazio = detecção por texto">
+    </label>
+    <label>
+      <span>Seletor do rótulo da fila (dentro da linha)</span>
+      <input type="text" id="queueSelector" placeholder="vazio = procura texto exato">
+    </label>
+    <label>
+      <span>Seletor do rótulo de status (dentro da linha)</span>
+      <input type="text" id="statusSelector" placeholder="vazio = procura texto exato">
+    </label>
+    <button id="diag">Copiar diagnóstico</button>
+  </details>
+
+  <script src="popup.js"></script>
+</body>
+</html>
