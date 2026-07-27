@@ -54,8 +54,15 @@ rede embaixo. Por isso a contagem falha fechada.
 npm install jsdom && node test/gates.test.js
 ```
 
-25 casos: pull nas quatro telas, limite por cada uma das três fontes, sem fonte
-de contagem, pull duplicado, lock entre abas, desligar em voo e instância órfã.
+30 casos. O que mais importa: **fila que nunca acaba**. Cada pull abre uma aba
+(como no Zendesk real), a contagem sobe, e o teste confirma que ele para exatamente
+no limite — 3 pulls com limite 3, 5 com limite 5. Era esse o cenário do loop.
+
+Também: pull nas quatro telas, limite por cada uma das três fontes, sem fonte de
+contagem, pull duplicado, lock entre abas, desligar em voo e instância órfã.
+
+O ritmo é de ~1 pull a cada 8 segundos — ele espera confirmar o anterior antes de
+tentar de novo. Isso sozinho já impede a enxurrada.
 
 ## Limitações
 

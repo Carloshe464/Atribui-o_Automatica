@@ -50,6 +50,7 @@
   const SEL = {
     bar: '[data-test-id="toolbar-serve-chat-button"]',
     tab: '[data-test-id="header-tab"]',
+    tablist: '[data-test-id="header-tablist"]',
     panelItem: [
       '[data-test-id="conversation-list-item"]',
       '[data-test-id*="conversation-list-item"]',
@@ -186,6 +187,12 @@
     }
 
     if (panel !== null) return { value: panel, from: 'painel', why: '' };
+
+    // Zero abas e uma contagem valida (nenhum chat aberto), nao ausencia de
+    // fonte. Exigir tabs > 0 fazia a extensao travar em "nao sei quantos chats
+    // sao meus" justamente quando estava livre pra puxar. Basta a barra de abas
+    // existir na tela pra o numero valer.
+    if ($$(SEL.tablist).length) return { value: tabs, from: 'abas', why: 'painel fechado' };
     if (tabs > 0) return { value: tabs, from: 'abas', why: 'painel fechado' };
     if (barCount !== null) return { value: barCount, from: 'barra', why: 'sem painel e sem abas' };
     return { value: null, from: '', why: 'nenhuma fonte de contagem disponivel' };

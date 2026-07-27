@@ -26,6 +26,9 @@ async function run({
   url = 'https://acme.zendesk.com/agent/home',
   cfg = {},
   waitMs = 1600,
+  // Simula o Zendesk de verdade: cada pull abre mais uma aba de chat, entao a
+  // contagem sobe. E assim que o limite tem chance de segurar o loop.
+  tabGrowsOnPull = false,
   killContext = false,
   disableMidFlight = false,
   seed = {}
@@ -36,7 +39,9 @@ async function run({
       : `<button data-test-id="toolbar-serve-chat-button"${barDisabled ? ' disabled' : ''}>Conversas\n${bar}</button>`;
 
   const dom = new JSDOM(
-    `<!doctype html><body>${barHtml}<header>${tabs.map(tab).join('')}</header><nav>${panel.join('')}</nav></body>`,
+    `<!doctype html><body>${barHtml}` +
+      `<header data-test-id="header-tablist">${tabs.map(tab).join('')}</header>` +
+      `<nav>${panel.join('')}</nav></body>`,
     { url, runScripts: 'outside-only' }
   );
   const w = dom.window;
@@ -61,6 +66,20 @@ async function run({
   w.document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.altKey && String(e.key).toLowerCase() === 'q') keys.push('Ctrl+Alt+Q');
   });
+
+  if (tabGrowsOnPull) {
+    const grow = () => {
+      const h = w.document.querySelector('header');
+      const el = w.document.createElement('div');
+      el.setAttribute('data-test-id', 'header-tab');
+      el.innerHTML = `<span>Chat ${h.children.length + 1}</span>`;
+      h.appendChild(el);
+    };
+    w.document.addEventListener('keydown', (e) => {
+      if (e.ctrlKey && e.altKey && String(e.key).toLowerCase() === 'q') grow();
+    });
+    w.document.querySelectorAll('button').forEach((b) => b.addEventListener('click', grow));
+  }
 
   const stored = {
     cfg: {
@@ -191,6 +210,33 @@ const pulled = (r) => r.keys.length + r.clicks.length > 0;
     seed: { serveLock: { id: 'outra-aba', ts: Date.now() } }
   });
   check('outra aba puxando => nao puxa junto', !pulled(r), JSON.stringify(r.status?.gate));
+
+  console.log('\n--- O cenario do loop: fila que nunca acaba ---');
+
+  // Era exatamente isto que acontecia: fila sempre com chat, e a extensao
+  // puxando ciclo apos ciclo. Aqui cada pull abre uma aba, entao a contagem
+  // sobe e o limite tem chance de segurar.
+  r = await run({
+    panel: [], bar: 9, tabGrowsOnPull: true, waitMs: 30000,
+    cfg: { maxChats: 3, countSource: 'auto' }
+  });
+  const total = r.keys.length + r.clicks.length;
+  check(`fila infinita, limite 3 => para em 3 (puxou ${total})`, total === 3, JSON.stringify({ k: r.keys.length, c: r.clicks.length }));
+  check('  e o motivo e o limite', /limite atingido: 3\/3/.test(r.status?.gate || ''), JSON.stringify(r.status?.gate));
+
+  // ~8s por pull (espera confirmar o anterior antes de tentar de novo), entao
+  // 5 pulls precisam de ~45s de janela.
+  r = await run({
+    panel: [], bar: 9, tabGrowsOnPull: true, waitMs: 50000,
+    cfg: { maxChats: 5, countSource: 'auto' }
+  });
+  check('mesmo cenario com limite 5 => para em 5', r.keys.length + r.clicks.length === 5, JSON.stringify({ k: r.keys.length, c: r.clicks.length }));
+
+  console.log('\n--- Contagem disponivel mesmo com zero abas ---');
+
+  r = await run({ panel: [], tabs: [], bar: 2 });
+  check('zero abas => conta 0, nao "nao sei"', r.status?.mine === 0, JSON.stringify({ m: r.status?.mine, g: r.status?.gate }));
+  check('  e puxa', pulled(r), JSON.stringify(r.status?.gate));
 
   console.log('\n--- Trava e instancia orfa ---');
 
