@@ -60,6 +60,19 @@
     'aguardando', 'waiting'
   ];
 
+  // O Agent Workspace codifica o status no proprio data-test-id do badge
+  // (data-test-id="status-badge-open"). Isso e MUITO mais confiavel que ler
+  // texto, entao e a primeira tentativa em detectStatus().
+  const STATUS_BADGE_MAP = {
+    new: 'novo',
+    open: 'aberto',
+    pending: 'pendente',
+    hold: 'em espera',
+    'on-hold': 'em espera',
+    solved: 'resolvido',
+    closed: 'fechado'
+  };
+
   // "novo" e "new" sao equivalentes; idem para os outros pares.
   const STATUS_ALIASES = {
     new: 'novo',
@@ -269,6 +282,16 @@
 
   // ------------------------------------------------------ regra 3: status "novo"
 
+  /** Le o status do badge, quando existir: data-test-id="status-badge-open". */
+  function statusFromBadge(row) {
+    const el = row.matches?.('[data-test-id^="status-badge-"]')
+      ? row
+      : row.querySelector('[data-test-id^="status-badge-"]');
+    if (!el) return null;
+    const raw = norm(el.getAttribute('data-test-id').slice('status-badge-'.length));
+    return STATUS_BADGE_MAP[raw] || null;
+  }
+
   /** Retorna o status canonico identificado, ou null se nao deu pra identificar. */
   function detectStatus(row) {
     if (cfg.statusSelector) {
@@ -282,6 +305,9 @@
       if (!t) return null;
       return STATUS_ALIASES[t] || (KNOWN_STATUSES.includes(t) ? t : null);
     }
+
+    const badge = statusFromBadge(row);
+    if (badge) return badge;
 
     for (const t of labelTexts(row)) {
       if (KNOWN_STATUSES.includes(t)) return STATUS_ALIASES[t] || t;
@@ -487,6 +513,54 @@
 
   // --------------------------------------------------------------- diagnostico
 
+  /** Panorama da tela: onde estamos e quais controles de chat existem. */
+  function probeEnvironment() {
+    const serveBtn = document.querySelector('[data-test-id="toolbar-serve-chat-button"]');
+    const convBtn = [...document.querySelectorAll('button, [role="button"]')].find((b) =>
+      /^conversas\b/.test(norm(b.innerText))
+    );
+    const path = location.pathname;
+    return [
+      `tela: ${path.includes('/filters/') ? 'views/tickets' : path.includes('chat') ? 'chat' : path}`,
+      `botao global "Servir chat": ${
+        serveBtn
+          ? `PRESENTE | texto=${JSON.stringify((serveBtn.innerText || serveBtn.getAttribute('aria-label') || '').trim())}` +
+            ` | disabled=${serveBtn.disabled || serveBtn.getAttribute('aria-disabled') === 'true'}` +
+            ` | visivel=${isVisible(serveBtn)}`
+          : 'ausente'
+      }`,
+      `painel Conversas: ${convBtn ? JSON.stringify(convBtn.innerText.replace(/\s+/g, ' ').trim()) : '(botao nao encontrado)'}`,
+      `linhas de tabela de tickets (generic-table-row): ${document.querySelectorAll('[data-test-id="generic-table-row"]').length}`
+    ];
+  }
+
+  /**
+   * Despeja as celulas da tabela de views. Serve pra descobrir QUAL custom field
+   * carrega a fila/categoria — os data-test-id vem numerados, sem nome legivel.
+   * Essa tabela NAO entra em LIST_CANDIDATES de proposito: linhas de ticket nao
+   * tem botao "Servir" e seriam contadas como chats meus, travando o limite.
+   */
+  function dumpTableRows(limit = 3) {
+    const rows = [...document.querySelectorAll('[data-test-id="generic-table-row"]')]
+      .filter(isVisible)
+      .slice(0, limit);
+    return rows.map((r, i) => {
+      const badge = r.querySelector('[data-test-id^="status-badge-"]');
+      const cells = [...r.querySelectorAll('[data-test-id]')]
+        .filter((c) => /cells-/.test(c.getAttribute('data-test-id')))
+        .map(
+          (c) =>
+            `        ${c.getAttribute('data-test-id')}: ` +
+            JSON.stringify((c.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 70))
+        );
+      return [
+        `  [${i}] status-badge: ${badge ? badge.getAttribute('data-test-id').replace('status-badge-', '') : '(nenhum)'}` +
+          ` => interpretado como: ${detectStatus(r) ?? '(nao identificado)'}`,
+        ...cells
+      ].join('\n');
+    });
+  }
+
   function diagnose() {
     const testIds = new Map();
     document.querySelectorAll('[data-test-id]').forEach((el) => {
@@ -528,6 +602,12 @@
       `status permitidos: ${allowedStatusList().join(', ')}`,
       `seletor de lista em uso: ${listSelectorUsed || '(NENHUM CASOU)'}`,
       `meus: ${status.mine} | pendentes: ${status.pending} | elegiveis: ${status.eligible}`,
+      '',
+      '--- panorama do ambiente ---',
+      ...probeEnvironment().map((l) => '  ' + l),
+      '',
+      '--- celulas da tabela de views (achar o campo da fila) ---',
+      ...(dumpTableRows().length ? dumpTableRows() : ['  (nenhuma linha de tabela)']),
       '',
       '--- candidatos de lista (elementos visiveis) ---',
       ...candidates,

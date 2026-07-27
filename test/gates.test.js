@@ -8,12 +8,13 @@ const { JSDOM } = require('jsdom');
 
 const SRC = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
 
-function row({ name, queue, status, pending, extra = '' }) {
+function row({ name, queue, status, badge, pending, extra = '' }) {
   return `
   <div data-test-id="conversation-list-item">
     <span>${name}</span>
     ${queue ? `<span>${queue}</span>` : ''}
     ${status ? `<span>${status}</span>` : ''}
+    ${badge ? `<span data-test-id="status-badge-${badge}">•</span>` : ''}
     <span>2 min</span>
     ${extra}
     ${pending ? '<button>Servir</button>' : ''}
@@ -135,6 +136,19 @@ function check(label, cond, detail) {
 
   r = await run({ rows: [row({ name: 'Z', queue: NFS, status: 'New', pending: true })] });
   check('status em ingles "New" => assume (alias)', r.clicks.length === 1, JSON.stringify(r.clicks));
+
+  console.log('\n--- Regra 3 via badge (data-test-id="status-badge-*") ---');
+
+  r = await run({ rows: [row({ name: 'B1', queue: NFS, badge: 'new', pending: true })] });
+  check('badge "new" sem texto de status => assume', r.clicks.length === 1, JSON.stringify(r.clicks));
+
+  for (const b of ['open', 'pending', 'hold', 'solved', 'closed']) {
+    r = await run({ rows: [row({ name: 'B', queue: NFS, badge: b, pending: true })] });
+    check(`badge "${b}" => bloqueia`, r.clicks.length === 0, JSON.stringify(r.clicks));
+  }
+
+  r = await run({ rows: [row({ name: 'B2', queue: NFS, badge: 'open', status: 'Novo', pending: true })] });
+  check('badge "open" prevalece sobre texto "Novo" => bloqueia', r.clicks.length === 0, JSON.stringify(r.clicks));
 
   console.log('\n--- Limite de simultaneos ---');
 

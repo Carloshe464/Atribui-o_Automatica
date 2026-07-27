@@ -13,7 +13,11 @@ resolvida — resulta em não fazer nada. Silêncio é o comportamento correto q
 |---|---|---|---|
 | 1 | **Só a fila NFs** | Um rótulo da linha precisa ser **exatamente** `Suporte Especializado (NFs)` (comparação sem acento/caixa, em elementos-folha) | Bloqueia. Sempre — não existe modo permissivo para essa regra |
 | 2 | **Só o Carlos Lemos** | `GET /api/v2/users/me.json` com cookie de sessão; fallback no DOM | A extensão inteira fica inerte |
-| 3 | **Só status Novo** | Um rótulo da linha precisa ser um status conhecido, e estar na lista de permitidos | Bloqueia, inclusive quando o status não é identificado |
+| 3 | **Só status Novo** | Lê `data-test-id="status-badge-<status>"` quando existir; senão cai no texto do rótulo | Bloqueia, inclusive quando o status não é identificado |
+
+O badge tem prioridade sobre o texto: o Agent Workspace codifica o status no próprio
+`data-test-id` (`status-badge-open`, `status-badge-new`), o que é bem mais confiável do que
+ler texto traduzido. Confirmado no ambiente `beteltecnologia.zendesk.com`.
 
 Sobre a trava 2, vale ser explícito: clicar em "Servir" atribui o chat para **quem está
 logado na aba** — não existe forma de atribuir para outra pessoa por esse caminho. Então a
