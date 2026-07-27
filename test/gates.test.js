@@ -23,12 +23,19 @@ function row({ name, queue, status, badge, pending, extra = '' }) {
 
 async function run({
   rows, agentName = 'Carlos Lemos', cfg = {}, mutate = null, waitMs = 1500,
+  url = 'https://acme.zendesk.com/agent/dashboard',
+  bar = null,           // contador do botao "Conversas" da barra superior
   seed = {},            // estado inicial do chrome.storage (disjuntor, lock)
   killContext = false,  // simula extensao recarregada sem F5
   disableMidFlight = false // desliga a trava no disco depois de carregada
 }) {
-  const dom = new JSDOM(`<!doctype html><body><nav>${rows.join('')}</nav></body>`, {
-    url: 'https://acme.zendesk.com/agent/dashboard',
+  const barHtml =
+    bar === null
+      ? ''
+      : `<button data-test-id="toolbar-serve-chat-button">Conversas\n${bar}</button>`;
+
+  const dom = new JSDOM(`<!doctype html><body>${barHtml}<nav>${rows.join('')}</nav></body>`, {
+    url,
     runScripts: 'outside-only'
   });
   const w = dom.window;
@@ -336,6 +343,38 @@ function check(label, cond, detail) {
   // O disjuntor precisa registrar o pull, senao nao segura nada.
   r = await run({ rows: elegivel() });
   check('pull bem-sucedido registra no disjuntor', (r.stored?.recentServes || []).length === 1, JSON.stringify(r.stored?.recentServes));
+
+  console.log('\n--- Telas onde pode puxar ---');
+
+  for (const p of ['/agent/home', '/agent/tickets/1043700', '/agent/filters/21225438247447', '/agent/dashboard']) {
+    r = await run({ rows: elegivel(), url: `https://acme.zendesk.com${p}` });
+    check(`${p} => puxa`, r.clicks.length === 1, JSON.stringify(r.status?.gateReason));
+  }
+
+  r = await run({ rows: elegivel(), url: 'https://acme.zendesk.com/hc/pt-br/articles/123' });
+  check('fora de /agent/ => nao puxa', r.clicks.length === 0, JSON.stringify(r.clicks));
+
+  r = await run({
+    rows: elegivel(),
+    url: 'https://acme.zendesk.com/agent/filters/99',
+    cfg: { allowedPaths: '/agent/home' }
+  });
+  check('telas restritas por config => respeita a lista', r.clicks.length === 0, JSON.stringify(r.clicks));
+
+  console.log('\n--- Contagem pelo contador da barra ---');
+
+  r = await run({ rows: elegivel(), bar: 0, cfg: { mineSource: 'bar' } });
+  check('barra=0 => puxa', r.clicks.length === 1, JSON.stringify(r.status?.gateReason));
+
+  r = await run({ rows: elegivel(), bar: 3, cfg: { mineSource: 'bar' } });
+  check('barra=3 com limite 3 => nao puxa', r.clicks.length === 0, JSON.stringify(r.clicks));
+  check('  e reporta o limite', /limite atingido: 3\/3/.test(r.status?.gateReason || ''), JSON.stringify(r.status?.gateReason));
+
+  r = await run({ rows: elegivel(), bar: null, cfg: { mineSource: 'bar' } });
+  check('sem botao da barra => nao puxa (fail-closed)', r.clicks.length === 0, JSON.stringify(r.status?.gateReason));
+
+  r = await run({ rows: elegivel(), bar: 2, cfg: { mineSource: 'bar' } });
+  check('barra reportada no status', r.status?.barMine === 2, JSON.stringify(r.status?.barMine));
 
   console.log(`\n=== ${pass} passaram, ${fail} falharam ===\n`);
   process.exit(fail ? 1 : 0);

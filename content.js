@@ -15,7 +15,7 @@
  *   2. cfg.enabled                  <- reconfirmado NO DISCO antes de agir
  *   3. agente autorizado
  *   4. meus chats < cfg.maxChats    <- sem contagem confiavel, NAO puxa
- *   5. painel de conversas aberto
+ *   5. numa tela do workspace (/agent/*)
  *   6. existe chat esperando na fila
  *   7. fila e status conferem       <- cfg.strictQueueGate, ligada por padrao
  *   8. disjuntor: teto de pulls na janela movel, independente do DOM
@@ -46,9 +46,13 @@
     //   'auto' - lista do DOM quando confiavel, senao a API
     //   'dom'  - so a lista do DOM
     //   'api'  - so a busca da API (independe da tela aberta)
+    //   'bar'  - o numero do botao "Conversas" da barra superior
     // Nao existe modo "sem limite": sem contagem confiavel, nao puxa.
     mineSource: 'auto',
-    mineApiQuery: 'type:ticket assignee:{me} status<solved via:chat',
+    mineApiQuery: 'type:ticket assignee:{me} status<solved',
+
+    // Telas onde pode puxar. Vazio = qualquer /agent/.
+    allowedPaths: '',
 
     // --- como puxar
     //   'auto'         - clica no botao da barra; se nao der, dispara o atalho
@@ -509,6 +513,21 @@
 
   const fingerprint = (row) => norm(text(row)).replace(/\d+/g, '#');
 
+  /**
+   * Telas onde puxar e permitido. O Agent Workspace e uma SPA: a barra superior
+   * (com o botao Conversas) existe em todas elas, entao nao ha motivo pra exigir
+   * o painel aberto — basta estar no workspace.
+   */
+  function onAllowedScreen() {
+    const path = location.pathname;
+    const extra = String(cfg.allowedPaths || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (extra.length) return extra.some((p) => path.startsWith(p));
+    return path.startsWith('/agent/');
+  }
+
   // ------------------------------------------------- contagem de "meus chats"
 
   /** Busca na API quantos chats ativos estao atribuidos a mim. Estrangulada. */
@@ -544,9 +563,18 @@
    * significa "nao sei" — e nesse caso o pull nao acontece, porque estourar o
    * limite e pior do que perder um chat.
    */
-  function resolveMine(domMineRows) {
+  function resolveMine(domMineRows, conv) {
     let src = cfg.mineSource || 'auto';
     if (src === 'off') src = 'auto';
+
+    // Contador do botao "Conversas" da barra: e o unico numero de chat presente
+    // em TODAS as telas do workspace, entao nao some ao navegar.
+    const barVal = conv && Number.isFinite(conv.count) ? conv.count : null;
+    if (src === 'bar') {
+      return barVal === null
+        ? { value: null, source: 'bar', why: 'botao Conversas nao encontrado' }
+        : { value: barVal, source: 'bar', why: '' };
+    }
 
     // 'off' foi removido: era ele que permitia puxar sem limite nenhum.
     // Config antiga com esse valor cai no comportamento seguro ('auto').
@@ -568,9 +596,10 @@
       return { value: null, source: 'api', why: apiMine.error || 'aguardando a API' };
     }
 
-    // auto
+    // auto: lista na tela > API > cache do DOM > barra
     if (domOk) return { value: domMineRows.length, source: 'dom', why: '' };
     if (apiMine.count !== null) return { value: apiMine.count, source: 'api', why: 'lista fora da tela' };
+    if (barVal !== null) return { value: barVal, source: 'bar', why: 'sem lista e sem API' };
     if (Date.now() - lastDomMine.at < DOM_MINE_TTL_MS && lastDomMine.value !== null) {
       return { value: lastDomMine.value, source: 'dom (cache)', why: 'lista fora da tela' };
     }
@@ -931,7 +960,7 @@
     const verdicts = pending.map((row) => ({ row, key: rowKey(row), ...evaluate(row) }));
     const eligible = verdicts.filter((v) => v.ok);
 
-    const mine = resolveMine(mineRows);
+    const mine = resolveMine(mineRows, conv);
     const q = queueWaiting(conv, pending);
 
     verifyServe(conv ? conv.count : null, mine.value);
@@ -949,6 +978,10 @@
       domMine: listInfo.trusted ? mineRows.length : null,
       apiMine: apiMine.count,
       apiMineError: apiMine.error,
+      barMine: conv && Number.isFinite(conv.count) ? conv.count : null,
+      apiQueryUsed: String(cfg.mineApiQuery || '').replace(/\{me\}/g, agent?.id ?? '{me}'),
+      screenOk: onAllowedScreen(),
+      path: location.pathname,
       pending: pending.length,
       eligible: eligible.length,
       queueWaiting: q.count,
@@ -984,9 +1017,11 @@
       return setGate(`limite atingido: ${mine.value}/${cfg.maxChats}`);
     }
 
-    // Exigencia explicita: so puxa com a tela de conversas aberta.
-    if (!rows.length) {
-      return setGate('painel de conversas fechado — abra para puxar');
+    // Precisa estar numa tela do Agent Workspace (/agent/home, /agent/tickets/N,
+    // /agent/filters/N, chat aberto...). Exigir a LISTA de conversas no DOM era
+    // errado: ela so existe com o painel aberto, entao bloqueava todas as telas.
+    if (!onAllowedScreen()) {
+      return setGate(`fora das telas de atendimento (${location.pathname})`);
     }
 
     if (serveAttempt && !serveAttempt.verified) {

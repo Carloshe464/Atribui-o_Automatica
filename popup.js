@@ -15,6 +15,7 @@ const FIELDS = {
   shortcut: 'text',
   mineSource: 'text',
   mineApiQuery: 'text',
+  allowedPaths: 'text',
   listItemSelector: 'text',
   serveSelector: 'text',
   queueSelector: 'text',
@@ -29,7 +30,8 @@ const DEFAULTS = {
   maxChats: 3,
   idleMinutes: 6,
   mineSource: 'auto',
-  mineApiQuery: 'type:ticket assignee:{me} status<solved via:chat',
+  mineApiQuery: 'type:ticket assignee:{me} status<solved',
+  allowedPaths: '',
   serveMethod: 'auto',
   shortcut: 'Ctrl+Alt+Q',
   strictQueueGate: true,
@@ -126,9 +128,17 @@ async function refresh() {
     ? (st.agent.ok ? `${st.agent.name} ✓` : '✕ não autorizado')
     : 'verificando…';
 
+  // As tres leituras lado a lado: comparar com a tela mostra na hora qual
+  // fonte esta certa, sem precisar de diagnostico.
+  const n = (v) => (v === null || v === undefined ? '–' : String(v));
+  $('s-sources').textContent =
+    `${n(st.domMine)} / ${n(st.apiMine)}${st.apiMineError ? '!' : ''} / ${n(st.barMine)}`;
+
   const partes = [];
-  if (st.mineSourceUsed) partes.push(`contagem: ${st.mineSourceUsed}${st.mineWhy ? ` (${st.mineWhy})` : ''}`);
-  if (tabCount > 1) partes.push(`${tabCount} abas do Zendesk abertas`);
+  if (st.mineSourceUsed) partes.push(`usando: ${st.mineSourceUsed}${st.mineWhy ? ` (${st.mineWhy})` : ''}`);
+  if (st.apiMineError) partes.push(`API: ${st.apiMineError}`);
+  if (!st.screenOk) partes.push(`tela: ${st.path}`);
+  if (tabCount > 1) partes.push(`${tabCount} abas abertas`);
   $('s-src').textContent = partes.join(' · ');
 
   const blocked = $('blocked');

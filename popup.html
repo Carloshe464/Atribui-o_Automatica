@@ -55,7 +55,8 @@
   <div id="gate"><b>Situação</b><span id="gate-text">conectando…</span></div>
 
   <div class="card" id="status">
-    <div class="row"><span>Meus chats</span><span id="s-mine">–</span></div>
+    <div class="row"><span>Meus chats (em uso)</span><span id="s-mine">–</span></div>
+    <div class="row muted"><span>&nbsp;&nbsp;lista / API / barra</span><span id="s-sources">–</span></div>
     <div class="row"><span>Esperando na fila</span><span id="s-queue">–</span></div>
     <div class="row"><span>Disjuntor (janela)</span><span id="s-breaker">–</span></div>
     <div class="row"><span>Agente</span><span id="s-agent">–</span></div>
@@ -142,15 +143,21 @@
     <label>
       <span>Contar meus chats por</span>
       <select id="mineSource">
-        <option value="auto">Automático — lista, senão API</option>
+        <option value="auto">Automático — lista, API, depois barra</option>
         <option value="dom">Só a lista na tela</option>
         <option value="api">Só a API</option>
+        <option value="bar">Só o contador "Conversas" da barra</option>
       </select>
     </label>
 
     <label>
       <span>Consulta da API</span>
       <input type="text" id="mineApiQuery">
+    </label>
+
+    <label>
+      <span>Telas onde pode puxar (vazio = qualquer /agent/)</span>
+      <input type="text" id="allowedPaths" placeholder="/agent/home, /agent/tickets/, /agent/filters">
     </label>
 
     <div class="check">
