@@ -29,6 +29,8 @@
   .gate div { font-size: 11.5px; }
   ul#blocked { margin: 6px 0 0; padding-left: 16px; font-size: 11.5px; opacity: .8; }
   ul#blocked li { margin-bottom: 2px; }
+  #blind-note { font-size: 11.5px; opacity: .75; line-height: 1.4; }
+  #s-blind { font-size: 11.5px; color: #d4593a; margin-top: 5px; display: none; }
   label { display: block; margin-bottom: 9px; }
   label > span { display: block; margin-bottom: 3px; }
   input[type=text], input[type=number], select {
@@ -76,6 +78,7 @@
     <div class="row"><span>Elegíveis pelas 3 regras</span><span id="s-eligible">–</span></div>
     <div class="row"><span class="muted" id="s-note">Aguardando a aba do Zendesk…</span></div>
     <ul id="blocked"></ul>
+    <div id="s-blind"></div>
   </div>
 
   <div class="check">
@@ -117,6 +120,28 @@
     <span>Status permitidos (separados por vírgula)</span>
     <input type="text" id="allowedStatuses" placeholder="novo">
   </label>
+
+  <hr>
+
+  <label>
+    <span>Como assumir</span>
+    <select id="serveMethod">
+      <option value="shortcut">Atalho de teclado — serve o próximo da fila</option>
+      <option value="globalButton">Botão "Servir chat" da barra — idem</option>
+      <option value="rowButton">Botão da própria linha — escolhe o chat</option>
+    </select>
+  </label>
+
+  <label id="shortcut-wrap">
+    <span>Atalho</span>
+    <input type="text" id="shortcut" placeholder="Ctrl+Alt+Q">
+  </label>
+
+  <div class="card" id="blind-note">
+    Os dois primeiros modos servem <b>o próximo da fila</b>, sem escolher qual.
+    Para não violar as regras de fila e status, só disparam quando
+    <b>todos</b> os pendentes forem elegíveis.
+  </div>
 
   <div class="check">
     <input type="checkbox" id="beep">

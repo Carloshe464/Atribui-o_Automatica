@@ -36,8 +36,19 @@ async function run({ rows, agentName = 'Carlos Lemos', cfg = {} }) {
   const clicks = [];
   w.document.querySelectorAll('button').forEach((b) => {
     b.addEventListener('click', () => {
-      clicks.push(b.closest('[data-test-id]').querySelector('span').textContent.trim());
+      const testId = b.getAttribute('data-test-id');
+      clicks.push(
+        testId === 'toolbar-serve-chat-button'
+          ? '<botao-global>'
+          : b.closest('[data-test-id]').querySelector('span').textContent.trim()
+      );
     });
+  });
+
+  // Captura o atalho como se a pagina do Zendesk o escutasse.
+  const keys = [];
+  w.document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.altKey && String(e.key).toLowerCase() === 'q') keys.push('Ctrl+Alt+Q');
   });
 
   const stored = {
@@ -47,6 +58,10 @@ async function run({ rows, agentName = 'Carlos Lemos', cfg = {} }) {
       queueMatchMode: 'exact',
       agentName: 'Carlos Lemos',
       allowedStatuses: 'novo',
+      // As regras 1-3 sao testadas no modo que escolhe o chat; o modo cego
+      // tem sua propria secao, com a trava de "todos elegiveis".
+      serveMethod: 'rowButton',
+      shortcut: 'Ctrl+Alt+Q',
       beep: false, debug: false,
       listItemSelector: '', serveSelector: '', queueSelector: '', statusSelector: '',
       ...cfg
@@ -75,7 +90,7 @@ async function run({ rows, agentName = 'Carlos Lemos', cfg = {} }) {
 
   listeners[0]?.({ type: 'zd-status' }, null, (res) => { statusReply = res; });
   dom.window.close();
-  return { clicks, status: statusReply };
+  return { clicks, keys, status: statusReply };
 }
 
 const NFS = 'Suporte Especializado (NFs)';
@@ -149,6 +164,53 @@ function check(label, cond, detail) {
 
   r = await run({ rows: [row({ name: 'B2', queue: NFS, badge: 'open', status: 'Novo', pending: true })] });
   check('badge "open" prevalece sobre texto "Novo" => bloqueia', r.clicks.length === 0, JSON.stringify(r.clicks));
+
+  console.log('\n--- Modo cego (Ctrl+Alt+Q): so dispara se TODOS forem elegiveis ---');
+
+  const SC = { serveMethod: 'shortcut' };
+
+  r = await run({ cfg: SC, rows: [row({ name: 'A', queue: NFS, status: 'Novo', pending: true })] });
+  check('1 pendente elegivel => dispara o atalho', r.keys.length === 1, JSON.stringify(r.keys));
+
+  r = await run({
+    cfg: SC,
+    rows: [
+      row({ name: 'A', queue: NFS, status: 'Novo', pending: true }),
+      row({ name: 'B', queue: NFS, status: 'Novo', pending: true })
+    ]
+  });
+  check('2 pendentes, ambos elegiveis => dispara', r.keys.length === 1, JSON.stringify(r.keys));
+
+  r = await run({
+    cfg: SC,
+    rows: [
+      row({ name: 'A', queue: NFS, status: 'Novo', pending: true }),
+      row({ name: 'B', queue: 'Suporte Geral', status: 'Novo', pending: true })
+    ]
+  });
+  check('fila mista (outra fila junto) => NAO dispara', r.keys.length === 0, JSON.stringify(r.keys));
+  check('  e reporta o motivo', /fila mista/.test(r.status?.blindBlocked || ''), JSON.stringify(r.status?.blindBlocked));
+
+  r = await run({
+    cfg: SC,
+    rows: [
+      row({ name: 'A', queue: NFS, status: 'Novo', pending: true }),
+      row({ name: 'B', queue: NFS, status: 'Aberto', pending: true })
+    ]
+  });
+  check('fila mista (um ja aberto) => NAO dispara', r.keys.length === 0, JSON.stringify(r.keys));
+
+  r = await run({ cfg: SC, rows: [row({ name: 'A', queue: NFS, status: 'Novo', pending: false })] });
+  check('nenhum pendente => nao dispara', r.keys.length === 0, JSON.stringify(r.keys));
+
+  r = await run({ cfg: SC, rows: [], agentName: 'Carlos Lemos' });
+  check('lista nao detectada => nao dispara (fail-closed)', r.keys.length === 0, JSON.stringify(r.keys));
+
+  r = await run({ cfg: SC, rows: [row({ name: 'A', queue: NFS, status: 'Novo', pending: true })], agentName: 'Outro Agente' });
+  check('agente errado => nao dispara', r.keys.length === 0, JSON.stringify(r.keys));
+
+  r = await run({ cfg: { ...SC, shortcut: 'Ctrl+Alt+J' }, rows: [row({ name: 'A', queue: NFS, status: 'Novo', pending: true })] });
+  check('atalho configuravel: Ctrl+Alt+J nao dispara o listener de Q', r.keys.length === 0, JSON.stringify(r.keys));
 
   console.log('\n--- Limite de simultaneos ---');
 

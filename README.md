@@ -28,6 +28,27 @@ Por que **exata** e não "contém" na fila: `contains` deixaria passar `Suporte 
 (NFs) VIP` e também uma linha em que o próprio cliente digitou o nome da fila na mensagem.
 Os dois casos estão cobertos por teste.
 
+## Como assumir: três modos
+
+| Modo | Ação | Escolhe o chat? |
+|---|---|---|
+| `shortcut` (padrão) | Dispara `Ctrl+Alt+Q` | Não — serve o próximo da fila |
+| `globalButton` | Clica em `toolbar-serve-chat-button` | Não — idem |
+| `rowButton` | Clica no "Servir" da própria linha | Sim |
+
+Os dois primeiros são **cegos**: servem o próximo da fila sem escolher qual. Isso
+tornaria as travas 1 e 3 inúteis — descobrir a fila depois do clique é justamente
+"tocar em atendimento que não deveria".
+
+A saída é uma trava adicional: **em modo cego, só dispara se todos os pendentes forem
+elegíveis.** Aí não importa qual venha, qualquer um respeita as regras. Com um único
+pendente fora da regra, não dispara — o próximo poderia ser exatamente ele. É
+conservador (perde oportunidade em fila mista) e nunca viola as regras.
+
+O atalho é despachado como `KeyboardEvent` no DOM compartilhado. O evento vai com
+`isTrusted=false`, o que atende atalhos de aplicação tratados em JS — que é o caso do
+Zendesk — mas não atalhos nativos do navegador.
+
 ## Instalar
 
 1. `edge://extensions` → **Modo de desenvolvedor**

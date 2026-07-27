@@ -8,6 +8,8 @@ const FIELDS = {
   queueMatchMode: 'text',
   agentName: 'text',
   allowedStatuses: 'text',
+  serveMethod: 'text',
+  shortcut: 'text',
   listItemSelector: 'text',
   serveSelector: 'text',
   queueSelector: 'text',
@@ -22,6 +24,8 @@ const DEFAULTS = {
   queueMatchMode: 'exact',
   agentName: 'Carlos Lemos',
   allowedStatuses: 'novo',
+  serveMethod: 'shortcut',
+  shortcut: 'Ctrl+Alt+Q',
   beep: true,
   debug: false,
   listItemSelector: '',
@@ -145,6 +149,14 @@ async function refresh() {
       : `Monitorando (${st.listSelectorUsed})`;
   }
 
+  const blind = $('s-blind');
+  if (st.blindBlocked) {
+    blind.style.display = 'block';
+    blind.textContent = `Não disparou — ${st.blindBlocked}`;
+  } else {
+    blind.style.display = 'none';
+  }
+
   blocked.innerHTML = '';
   for (const b of st.blocked || []) {
     const li = document.createElement('li');
@@ -153,6 +165,13 @@ async function refresh() {
   }
 }
 
+function syncMethodUI() {
+  const m = $('serveMethod').value;
+  $('shortcut-wrap').style.display = m === 'shortcut' ? 'block' : 'none';
+  $('blind-note').style.display = m === 'rowButton' ? 'none' : 'block';
+}
+
+$('serveMethod').addEventListener('change', syncMethodUI);
 $('save').addEventListener('click', save);
 
 $('diag').addEventListener('click', async () => {
@@ -166,5 +185,5 @@ $('diag').addEventListener('click', async () => {
   msg('Diagnóstico copiado.');
 });
 
-loadConfig().then(refresh);
+loadConfig().then(() => { syncMethodUI(); refresh(); });
 setInterval(refresh, 1500);

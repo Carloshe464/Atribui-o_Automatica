@@ -36,6 +36,13 @@
     // --- regra 3: status
     allowedStatuses: 'novo',
 
+    // como assumir:
+    //   'shortcut'     - dispara Ctrl+Alt+Q (serve o proximo da fila) [cego]
+    //   'globalButton' - clica em toolbar-serve-chat-button           [cego]
+    //   'rowButton'    - clica no botao "Servir" da linha             [escolhe o chat]
+    serveMethod: 'shortcut',
+    shortcut: 'Ctrl+Alt+Q',
+
     beep: true,
     debug: false,
 
@@ -119,6 +126,7 @@
     pending: 0,
     eligible: 0,
     blocked: [],
+    blindBlocked: '',
     agent: null,
     listSelectorUsed: '',
     lastAction: '',
@@ -371,6 +379,56 @@
 
   const fingerprint = (row) => norm(row.innerText).replace(/\d+/g, '#');
 
+  // ------------------------------------------------------ disparo do atalho
+
+  /** "Ctrl+Alt+Q" -> init de KeyboardEvent. So trata teclas de letra. */
+  function parseShortcut(str) {
+    const parts = String(str || 'Ctrl+Alt+Q').split('+').map((s) => norm(s));
+    const init = { ctrlKey: false, altKey: false, shiftKey: false, metaKey: false };
+    let key = 'q';
+    for (const p of parts) {
+      if (p === 'ctrl' || p === 'control') init.ctrlKey = true;
+      else if (p === 'alt') init.altKey = true;
+      else if (p === 'shift') init.shiftKey = true;
+      else if (p === 'meta' || p === 'cmd' || p === 'win') init.metaKey = true;
+      else if (p) key = p;
+    }
+    const upper = key.toUpperCase();
+    return {
+      ...init,
+      key,
+      code: /^[a-z]$/.test(key) ? 'Key' + upper : upper,
+      keyCode: upper.charCodeAt(0),
+      which: upper.charCodeAt(0),
+      bubbles: true,
+      cancelable: true,
+      composed: true
+    };
+  }
+
+  /**
+   * O content script roda em mundo isolado, mas compartilha o DOM — entao um
+   * evento despachado aqui chega nos listeners da pagina. O evento vai com
+   * isTrusted=false; atalhos de aplicacao tratados em JS respondem normalmente,
+   * atalhos nativos do navegador nao (nao e o caso aqui).
+   */
+  function fireShortcut() {
+    const init = parseShortcut(cfg.shortcut);
+    const target =
+      document.activeElement && document.activeElement !== document.body
+        ? document.activeElement
+        : document;
+    for (const type of ['keydown', 'keypress', 'keyup']) {
+      try {
+        target.dispatchEvent(new KeyboardEvent(type, init));
+      } catch (e) {
+        console.error('[ZD-Auto] falha ao disparar o atalho:', e);
+        return false;
+      }
+    }
+    return true;
+  }
+
   // ------------------------------------------------------------------- alertas
 
   function beep() {
@@ -492,15 +550,44 @@
     if (Date.now() - lastServeAt < SERVE_COOLDOWN_MS) return;
     if (!eligible.length) return;
 
-    const target = eligible[0];
-    const btn = serveButtonsIn(target.row)[0];
-    if (!btn) return;
+    const method = cfg.serveMethod || 'shortcut';
 
-    lastServeAt = Date.now();
-    const label = target.key || 'chat da fila';
-    btn.click();
-    setAction(`Assumido: ${label}`);
-    notify('Chat assumido', `${label} — ${cfg.queueFilter}`, false);
+    // Modo com escolha: clica no botao da propria linha ja aprovada.
+    if (method === 'rowButton') {
+      const target = eligible[0];
+      const btn = serveButtonsIn(target.row)[0];
+      if (!btn) return;
+      lastServeAt = Date.now();
+      const label = target.key || 'chat da fila';
+      btn.click();
+      setAction(`Assumido: ${label}`);
+      notify('Chat assumido', `${label} — ${cfg.queueFilter}`, false);
+      return;
+    }
+
+    // Modos cegos (atalho e botao global): a acao serve "o proximo da fila",
+    // sem escolher qual. So e seguro se TODOS os pendentes forem elegiveis —
+    // com um unico fora da regra, o proximo poderia ser justamente ele.
+    if (eligible.length !== pending.length) {
+      status.blindBlocked =
+        `fila mista: ${pending.length - eligible.length} de ${pending.length} pendente(s) fora da regra`;
+      return;
+    }
+    status.blindBlocked = '';
+
+    if (method === 'globalButton') {
+      const gb = document.querySelector('[data-test-id="toolbar-serve-chat-button"]');
+      if (!gb || !isVisible(gb) || gb.disabled || gb.getAttribute('aria-disabled') === 'true') return;
+      lastServeAt = Date.now();
+      gb.click();
+      setAction('Assumido pelo botao global');
+    } else {
+      lastServeAt = Date.now();
+      if (!fireShortcut()) return;
+      setAction(`Assumido via ${cfg.shortcut}`);
+    }
+
+    notify('Chat assumido', `${pending.length} elegivel(is) — ${cfg.queueFilter}`, false);
   }
 
   function loop() {
@@ -599,6 +686,8 @@
       `url: ${location.href}`,
       `agente: ${agent ? `${agent.name} (${agent.source}) ok=${agent.ok}` : '(nao resolvido)'}`,
       `fila alvo: "${cfg.queueFilter}" | modo: ${cfg.queueMatchMode}`,
+      `metodo: ${cfg.serveMethod} ${cfg.serveMethod === 'shortcut' ? `(${cfg.shortcut})` : ''}` +
+        `${cfg.serveMethod !== 'rowButton' ? ' [cego: exige TODOS os pendentes elegiveis]' : ''}`,
       `status permitidos: ${allowedStatusList().join(', ')}`,
       `seletor de lista em uso: ${listSelectorUsed || '(NENHUM CASOU)'}`,
       `meus: ${status.mine} | pendentes: ${status.pending} | elegiveis: ${status.eligible}`,
