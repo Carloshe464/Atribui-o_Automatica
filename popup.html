@@ -5,26 +5,30 @@
 <style>
   :root { color-scheme: light dark; }
   body {
-    width: 344px; margin: 0; padding: 14px;
+    width: 330px; margin: 0; padding: 14px;
     font: 13px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif;
     background: Canvas; color: CanvasText;
   }
   h1 { font-size: 13px; margin: 0 0 10px; }
+  #gate {
+    font-size: 12px; margin-bottom: 10px; padding: 9px 10px; border-radius: 8px;
+    background: color-mix(in srgb, CanvasText 7%, Canvas); line-height: 1.35;
+  }
+  #gate.good { background: color-mix(in srgb, #2b8a3e 15%, Canvas); }
+  #gate.bad  { background: color-mix(in srgb, #d4593a 15%, Canvas); }
+  #gate b {
+    display: block; font-size: 10.5px; text-transform: uppercase;
+    letter-spacing: .06em; opacity: .55; margin-bottom: 2px; font-weight: 600;
+  }
   .card {
     border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
     border-radius: 8px; padding: 9px 10px; margin-bottom: 10px;
   }
-  .card.bad { border-color: #d4593a; }
-  .card.good { border-color: #2b8a3e; }
   .row { display: flex; justify-content: space-between; gap: 10px; }
   .row + .row { margin-top: 3px; }
   .row > span:last-child { font-variant-numeric: tabular-nums; font-weight: 600; }
-  .muted { opacity: .65; font-size: 11.5px; }
-  #gate { font-size: 12px; margin-bottom: 10px; padding: 8px 10px; border-radius: 8px;
-          background: color-mix(in srgb, CanvasText 7%, Canvas); line-height: 1.35; }
-  #gate b { display: block; font-size: 10.5px; text-transform: uppercase;
-            letter-spacing: .06em; opacity: .55; margin-bottom: 2px; font-weight: 600; }
-  ul#blocked { margin: 6px 0 0; padding-left: 16px; font-size: 11.5px; opacity: .8; }
+  .muted { opacity: .6; font-size: 11.5px; }
+  .muted > span:last-child { font-weight: 500 !important; }
   label { display: block; margin-bottom: 9px; }
   label > span { display: block; margin-bottom: 3px; }
   input[type=text], input[type=number], select {
@@ -32,7 +36,7 @@
     border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
     border-radius: 6px; background: Field; color: FieldText; font: inherit;
   }
-  .check { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+  .check { display: flex; align-items: center; gap: 7px; margin-bottom: 10px; }
   .check input { margin: 0; }
   .check label { margin: 0; }
   button {
@@ -41,8 +45,6 @@
     background: color-mix(in srgb, CanvasText 8%, Canvas); color: CanvasText;
   }
   button.primary { background: #03363d; color: #fff; border-color: #03363d; }
-  button.danger { border-color: #d4593a; color: #d4593a; }
-  button + button { margin-top: 6px; }
   hr { border: 0; border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent); margin: 12px 0; }
   details summary { cursor: pointer; font-size: 12px; opacity: .8; }
   details > *:not(summary) { margin-top: 8px; }
@@ -54,19 +56,16 @@
 
   <div id="gate"><b>Situação</b><span id="gate-text">conectando…</span></div>
 
-  <div class="card" id="status">
-    <div class="row"><span>Meus chats (em uso)</span><span id="s-mine">–</span></div>
-    <div class="row muted"><span>&nbsp;&nbsp;fontes de contagem</span><span id="s-sources">–</span></div>
+  <div class="card">
+    <div class="row"><span>Meus chats</span><span id="s-mine">–</span></div>
     <div class="row"><span>Esperando na fila</span><span id="s-queue">–</span></div>
-    <div class="row"><span>Disjuntor (janela)</span><span id="s-breaker">–</span></div>
-    <div class="row"><span>Agente</span><span id="s-agent">–</span></div>
-    <div class="row muted"><span id="s-src"></span></div>
-    <ul id="blocked"></ul>
+    <div class="row muted"><span>painel / abas / barra</span><span id="s-sources">–</span></div>
+    <div class="row muted"><span id="s-note"></span><span></span></div>
   </div>
 
   <div class="check">
     <input type="checkbox" id="enabled">
-    <label for="enabled"><b>Atribuição automática ligada</b></label>
+    <label for="enabled"><b>Puxar chat automaticamente</b></label>
   </div>
 
   <label>
@@ -75,63 +74,34 @@
   </label>
 
   <label>
-    <span>Teto do disjuntor (minutos)</span>
-    <input type="number" id="breakerMinutes" min="1" max="120" step="1">
-  </label>
-
-  <label>
     <span>Alertar após (minutos sem resposta)</span>
     <input type="number" id="idleMinutes" min="1" max="60" step="1">
   </label>
 
+  <label>
+    <span>Contar meus chats por</span>
+    <select id="countSource">
+      <option value="auto">Automático — painel, abas, depois barra</option>
+      <option value="panel">Painel de conversas</option>
+      <option value="tabs">Abas de ticket abertas no topo</option>
+      <option value="bar">Contador do botão "Conversas"</option>
+    </select>
+  </label>
+
   <button class="primary" id="save">Salvar</button>
-  <button class="danger" id="reset-breaker">Zerar disjuntor</button>
   <div id="msg"></div>
 
   <hr>
 
   <details>
-    <summary>Travas de fila, status e agente</summary>
-
-    <div class="check">
-      <input type="checkbox" id="strictQueueGate">
-      <label for="strictQueueGate">Só puxar da fila e status abaixo</label>
-    </div>
+    <summary>Avançado</summary>
 
     <label>
-      <span>Fila permitida (única)</span>
-      <input type="text" id="queueFilter">
-    </label>
-
-    <label>
-      <span>Correspondência da fila</span>
-      <select id="queueMatchMode">
-        <option value="exact">Exata (recomendado)</option>
-        <option value="contains">Contém</option>
-      </select>
-    </label>
-
-    <label>
-      <span>Status permitidos</span>
-      <input type="text" id="allowedStatuses" placeholder="novo">
-    </label>
-
-    <label>
-      <span>Agente autorizado (vazio = qualquer um)</span>
-      <input type="text" id="agentName">
-    </label>
-  </details>
-
-  <details>
-    <summary>Como puxar e como contar</summary>
-
-    <label>
-      <span>Método</span>
+      <span>Como puxar</span>
       <select id="serveMethod">
-        <option value="auto">Automático — botão da barra, senão atalho</option>
-        <option value="globalButton">Só o botão da barra</option>
+        <option value="auto">Automático — botão, senão atalho</option>
         <option value="shortcut">Só o atalho</option>
-        <option value="rowButton">Botão da linha (escolhe o chat)</option>
+        <option value="button">Só o botão "Conversas"</option>
       </select>
     </label>
 
@@ -140,66 +110,16 @@
       <input type="text" id="shortcut" placeholder="Ctrl+Alt+Q">
     </label>
 
-    <label>
-      <span>Contar meus chats por</span>
-      <select id="mineSource">
-        <option value="auto">Automático — lista, API, depois barra</option>
-        <option value="dom">Só a lista na tela</option>
-        <option value="api">Só a API</option>
-        <option value="bar">Só o contador "Conversas" da barra</option>
-        <option value="view">Só a tabela da view (responsável = você)</option>
-        <option value="viewApi">Só a API da fila (funciona em qualquer tela)</option>
-      </select>
-    </label>
-
-    <label>
-      <span>Consulta da API</span>
-      <input type="text" id="mineApiQuery">
-    </label>
-
-    <label>
-      <span>Views (filas) permitidas — ids separados por vírgula</span>
-      <input type="text" id="allowedViewIds" placeholder="21225438247447">
-    </label>
-
-    <label>
-      <span>Telas onde pode puxar (vazio = qualquer /agent/)</span>
-      <input type="text" id="allowedPaths" placeholder="/agent/home, /agent/tickets/, /agent/filters">
-    </label>
-
-    <div class="check">
-      <input type="checkbox" id="autoOpenPanel">
-      <label for="autoOpenPanel">Abrir o painel "Conversas" sozinho</label>
-    </div>
-
     <div class="check">
       <input type="checkbox" id="beep">
       <label for="beep">Som no alerta de silêncio</label>
     </div>
-  </details>
 
-  <details>
-    <summary>Diagnóstico</summary>
     <div class="check">
       <input type="checkbox" id="debug">
       <label for="debug">Log no console da página</label>
     </div>
-    <label>
-      <span>Seletor dos itens da lista</span>
-      <input type="text" id="listItemSelector" placeholder="vazio = automático">
-    </label>
-    <label>
-      <span>Seletor do botão Servir</span>
-      <input type="text" id="serveSelector" placeholder="vazio = por texto">
-    </label>
-    <label>
-      <span>Seletor do rótulo da fila</span>
-      <input type="text" id="queueSelector" placeholder="vazio = texto exato">
-    </label>
-    <label>
-      <span>Seletor do rótulo de status</span>
-      <input type="text" id="statusSelector" placeholder="vazio = badge/texto">
-    </label>
+
     <button id="diag">Copiar diagnóstico</button>
   </details>
 
