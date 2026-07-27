@@ -26,6 +26,8 @@ async function run({
   url = 'https://acme.zendesk.com/agent/dashboard',
   bar = null,           // contador do botao "Conversas" da barra superior
   barDisabled = false,  // como no ambiente real: fica desabilitado em 0
+  viewApiTickets = [],  // resposta de /api/v2/views/<id>/tickets.json (null = 403)
+  searchCount = 0,      // resposta de /api/v2/search/count.json
   seed = {},            // estado inicial do chrome.storage (disjuntor, lock)
   killContext = false,  // simula extensao recarregada sem F5
   disableMidFlight = false // desliga a trava no disco depois de carregada
@@ -116,8 +118,19 @@ async function run({
   // Permite ao teste inspecionar/derrubar o storage compartilhado.
   w.__stored = stored;
   w.fetch = async (url) => {
-    if (!String(url).includes('/api/v2/users/me.json')) throw new Error('404');
-    return { ok: true, json: async () => ({ user: { name: agentName, id: 1 } }) };
+    const u = String(url);
+    if (u.includes('/api/v2/users/me.json')) {
+      return { ok: true, json: async () => ({ user: { name: agentName, id: 1 } }) };
+    }
+    // GET /api/v2/views/<id>/tickets.json — a fila sem depender da tela
+    if (/\/api\/v2\/views\/\d+\/tickets\.json/.test(u)) {
+      if (viewApiTickets === null) return { ok: false, status: 403, json: async () => ({}) };
+      return { ok: true, json: async () => ({ tickets: viewApiTickets }) };
+    }
+    if (u.includes('/api/v2/search/count.json')) {
+      return { ok: true, json: async () => ({ count: searchCount }) };
+    }
+    throw new Error('404');
   };
 
   w.eval(SRC);
@@ -469,6 +482,58 @@ function check(label, cond, detail) {
     url: VIEW_URL, cfg: { ...autoCfg, maxChats: 2 }, bar: 0, barDisabled: true
   });
   check('limite atingido => atalho nao dispara', r.keys.length === 0, JSON.stringify({ keys: r.keys, gate: r.status?.gateReason }));
+
+  console.log('\n--- Fila pela API da view (na tela do ticket, sem tabela) ---');
+
+  // Cenario real: analista dentro de /agent/tickets/1044082, sem tabela no DOM.
+  const TICKET_URL = 'https://acme.zendesk.com/agent/tickets/1044082';
+  // mineSource 'auto' pra deixar a API da view entrar; o harness usa 'dom'.
+  const apiCfg = { serveMethod: 'auto', mineSource: 'auto', allowedViewIds: '21225438247447' };
+
+  r = await run({
+    waitMs: 3200, rows: [], url: TICKET_URL, cfg: apiCfg, bar: 0, barDisabled: true,
+    viewApiTickets: [
+      { id: 1044095, subject: 'Conversa com Vanderlei', status: 'new', assignee_id: null },
+      { id: 1044082, subject: 'Conversa com NAYANE', status: 'open', assignee_id: 1 },
+      { id: 1044085, subject: 'Conversa com SILVIO', status: 'open', assignee_id: 77 }
+    ]
+  });
+  check('ve a fila sem tabela no DOM', r.status?.viewApiAvail === 1, JSON.stringify(r.status?.viewApiAvail));
+  check('conta 1 chat meu pela API da view', r.status?.viewApiMine === 1, JSON.stringify(r.status?.viewApiMine));
+  check('  e puxa (barra em 0 nao bloqueia mais)', r.keys.length === 1, JSON.stringify({ keys: r.keys, gate: r.status?.gateReason }));
+
+  // Fila vazia de novos: nada a puxar.
+  r = await run({
+    waitMs: 3200, rows: [], url: TICKET_URL, cfg: apiCfg, bar: 0, barDisabled: true,
+    viewApiTickets: [{ id: 1, subject: 'A', status: 'open', assignee_id: 1 }]
+  });
+  check('sem ticket novo na fila => nao puxa', r.keys.length === 0, JSON.stringify(r.keys));
+
+  // Ticket novo mas ja atribuido a outro nao conta como disponivel.
+  r = await run({
+    waitMs: 3200, rows: [], url: TICKET_URL, cfg: apiCfg, bar: 0, barDisabled: true,
+    viewApiTickets: [{ id: 2, subject: 'B', status: 'new', assignee_id: 77 }]
+  });
+  check('novo ja atribuido a outro => nao disponivel', r.status?.viewApiAvail === 0, JSON.stringify(r.status?.viewApiAvail));
+  check('  e nao puxa', r.keys.length === 0, JSON.stringify(r.keys));
+
+  // Limite pela contagem da API da view.
+  r = await run({
+    waitMs: 3200, rows: [], url: TICKET_URL, cfg: { ...apiCfg, maxChats: 2 }, bar: 0, barDisabled: true,
+    viewApiTickets: [
+      { id: 1, subject: 'A', status: 'open', assignee_id: 1 },
+      { id: 2, subject: 'B', status: 'open', assignee_id: 1 },
+      { id: 3, subject: 'C', status: 'new', assignee_id: null }
+    ]
+  });
+  check('limite atingido pela API da view => nao puxa', /limite atingido: 2\/2/.test(r.status?.gateReason || ''), JSON.stringify(r.status?.gateReason));
+
+  // API da view falhando: nao pode virar "0 meus" e liberar o limite.
+  r = await run({
+    waitMs: 3200, rows: [], url: TICKET_URL, cfg: { ...apiCfg, mineSource: 'viewApi' }, bar: 0, barDisabled: true,
+    viewApiTickets: null
+  });
+  check('API da view em erro => nao puxa (fail-closed)', r.keys.length === 0, JSON.stringify({ keys: r.keys, gate: r.status?.gateReason }));
 
   console.log(`\n=== ${pass} passaram, ${fail} falharam ===\n`);
   process.exit(fail ? 1 : 0);

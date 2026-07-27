@@ -596,6 +596,68 @@
     };
   }
 
+  // --------------------------------------------- fila pela API da view (sem DOM)
+
+  /**
+   * A tabela da view so existe em /agent/filters/<id>. Na tela do ticket — onde
+   * o analista passa a maior parte do tempo — ela nao esta montada, e a extensao
+   * ficava cega pra fila (o contador da barra marca 0 mesmo com chat esperando).
+   *
+   * GET /api/v2/views/<id>/tickets.json resolve isso: traz os tickets da fila
+   * com status e assignee_id, independente da tela aberta. GET com cookie de
+   * sessao nao precisa de CSRF.
+   */
+  const VIEW_API_MS = 8000;
+  let viewApi = { at: 0, pending: false, error: '', avail: [], mine: null, total: null };
+
+  function allowedViewIdList() {
+    return String(cfg.allowedViewIds || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  function refreshViewApi() {
+    const ids = allowedViewIdList();
+    if (!ids.length || !agent?.id) return;
+    if (viewApi.pending || Date.now() - viewApi.at < VIEW_API_MS) return;
+
+    viewApi.pending = true;
+    const allowed = allowedStatusList();
+
+    Promise.all(
+      ids.map((id) =>
+        fetch(`/api/v2/views/${id}/tickets.json?per_page=100`, {
+          credentials: 'include',
+          headers: { Accept: 'application/json' }
+        })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status} na view ${id}`))))
+          .then((j) => j?.tickets || [])
+      )
+    )
+      .then((lists) => {
+        const tickets = lists.flat();
+        viewApi.at = Date.now();
+        viewApi.error = '';
+        viewApi.total = tickets.length;
+        // status da API vem em ingles; STATUS_ALIASES normaliza pro portugues.
+        viewApi.avail = tickets
+          .filter((t) => !t.assignee_id)
+          .filter((t) => allowed.includes(STATUS_ALIASES[norm(t.status)] || norm(t.status)))
+          .map((t) => ({ id: t.id, subject: t.subject || '', status: norm(t.status) }));
+        viewApi.mine = tickets.filter((t) => t.assignee_id === agent.id).length;
+      })
+      .catch((e) => {
+        viewApi.at = Date.now();
+        viewApi.error = e.message;
+        viewApi.avail = [];
+        viewApi.mine = null;
+      })
+      .finally(() => {
+        viewApi.pending = false;
+      });
+  }
+
   // ------------------------------------------------- contagem de "meus chats"
 
   /** Busca na API quantos chats ativos estao atribuidos a mim. Estrangulada. */
@@ -670,7 +732,19 @@
       return { value: null, source: 'api', why: apiMine.error || 'aguardando a API' };
     }
 
-    // auto: lista na tela > API > cache do DOM > barra
+    if (src === 'viewApi') {
+      return viewApi.mine === null
+        ? { value: null, source: 'api da view', why: viewApi.error || 'aguardando a API' }
+        : { value: viewApi.mine, source: 'api da view', why: '' };
+    }
+
+    // auto: tabela na tela > API da fila > busca > cache do DOM > barra
+    if (view?.on && view.mine !== null && view.mine !== undefined) {
+      return { value: view.mine, source: 'view', why: '' };
+    }
+    if (viewApi.mine !== null) {
+      return { value: viewApi.mine, source: 'api da view', why: 'tabela fora da tela' };
+    }
     if (domOk) return { value: domMineRows.length, source: 'dom', why: '' };
     if (apiMine.count !== null) return { value: apiMine.count, source: 'api', why: 'lista fora da tela' };
     if (barVal !== null) return { value: barVal, source: 'bar', why: 'sem lista e sem API' };
@@ -913,6 +987,11 @@
     if (view && view.on) {
       return { has: view.avail.length > 0, count: view.avail.length, from: 'view' };
     }
+    // Fora da tela de views, a API da fila e a unica fonte confiavel: o
+    // contador da barra fica em 0 mesmo havendo chat esperando.
+    if (viewApi.mine !== null || viewApi.avail.length) {
+      return { has: viewApi.avail.length > 0, count: viewApi.avail.length, from: 'api da view' };
+    }
     if (conv && conv.visible && !conv.disabled && conv.count !== null && conv.count > 0) {
       return { has: true, count: conv.count, from: 'barra' };
     }
@@ -1010,6 +1089,7 @@
   function tick() {
     const ag = agentGate();
     refreshApiMine();
+    refreshViewApi();
 
     const conv = readConversationsButton();
     const rows = findRows();
@@ -1069,6 +1149,10 @@
       viewAllowed: view.on ? view.allowed : null,
       viewMine: view.mine,
       viewAvail: view.on ? view.avail.map((i) => `#${i.id} ${i.subject}`).slice(0, 5) : [],
+      viewApiMine: viewApi.mine,
+      viewApiAvail: viewApi.avail.length,
+      viewApiTotal: viewApi.total,
+      viewApiError: viewApi.error,
       apiQueryUsed: String(cfg.mineApiQuery || '').replace(/\{me\}/g, agent?.id ?? '{me}'),
       screenOk: onAllowedScreen(),
       path: location.pathname,
@@ -1141,7 +1225,12 @@
       if (!view.avail.length) return setGate('nenhum chat novo sem responsavel na fila');
     }
 
-    if (cfg.strictQueueGate && !view.on && (cfg.serveMethod || 'auto') !== 'rowButton') {
+    // Quando a fila veio da view (DOM ou API), fila e status ja foram conferidos
+    // na origem: view permitida + sem responsavel + status na lista. Reaplicar a
+    // checagem por lista do DOM aqui so bloquearia sem acrescentar garantia.
+    const queueJaConferida = q.from === 'view' || q.from === 'api da view';
+
+    if (cfg.strictQueueGate && !queueJaConferida && (cfg.serveMethod || 'auto') !== 'rowButton') {
       if (!pending.length) {
         return setGate('trava de fila ligada, mas a lista nao mostra os pendentes');
       }
@@ -1378,6 +1467,12 @@
       '',
       '--- panorama do ambiente ---',
       ...probeEnvironment().map((l) => '  ' + l),
+      '',
+      '--- API da fila (independe da tela aberta) ---',
+      `  views consultadas: ${allowedViewIdList().join(', ') || '(nenhuma configurada)'}`,
+      `  tickets na fila: ${viewApi.total ?? '?'} | meus: ${viewApi.mine ?? '?'} | disponiveis: ${viewApi.avail.length}`,
+      ...(viewApi.error ? [`  ERRO: ${viewApi.error}`] : []),
+      ...viewApi.avail.slice(0, 8).map((t) => `    #${t.id} [${t.status}] ${t.subject}`),
       '',
       '--- API: contagens (achar a consulta que reflete os chats ativos) ---',
       ...(await probeApi()),

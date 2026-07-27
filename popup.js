@@ -134,11 +134,12 @@ async function refresh() {
   // fonte esta certa, sem precisar de diagnostico.
   const n = (v) => (v === null || v === undefined ? '–' : String(v));
   $('s-sources').textContent =
-    `${n(st.domMine)} / ${n(st.apiMine)}${st.apiMineError ? '!' : ''} / ${n(st.barMine)}`;
+    `${n(st.viewApiMine)} api-fila · ${n(st.apiMine)} busca · ${n(st.barMine)} barra`;
 
   const partes = [];
   if (st.mineSourceUsed) partes.push(`usando: ${st.mineSourceUsed}${st.mineWhy ? ` (${st.mineWhy})` : ''}`);
-  if (st.apiMineError) partes.push(`API: ${st.apiMineError}`);
+  if (st.apiMineError) partes.push(`busca: ${st.apiMineError}`);
+  if (st.viewApiError) partes.push(`API da fila: ${st.viewApiError}`);
   if (!st.screenOk) partes.push(`tela: ${st.path}`);
   if (tabCount > 1) partes.push(`${tabCount} abas abertas`);
   $('s-src').textContent = partes.join(' · ');
