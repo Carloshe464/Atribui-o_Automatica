@@ -25,6 +25,7 @@ async function run({
   rows, agentName = 'Carlos Lemos', cfg = {}, mutate = null, waitMs = 1500,
   url = 'https://acme.zendesk.com/agent/dashboard',
   bar = null,           // contador do botao "Conversas" da barra superior
+  barDisabled = false,  // como no ambiente real: fica desabilitado em 0
   seed = {},            // estado inicial do chrome.storage (disjuntor, lock)
   killContext = false,  // simula extensao recarregada sem F5
   disableMidFlight = false // desliga a trava no disco depois de carregada
@@ -32,7 +33,7 @@ async function run({
   const barHtml =
     bar === null
       ? ''
-      : `<button data-test-id="toolbar-serve-chat-button">Conversas\n${bar}</button>`;
+      : `<button data-test-id="toolbar-serve-chat-button"${barDisabled ? ' disabled' : ''}>Conversas\n${bar}</button>`;
 
   const dom = new JSDOM(`<!doctype html><body>${barHtml}<nav>${rows.join('')}</nav></body>`, {
     url,
@@ -436,6 +437,38 @@ function check(label, cond, detail) {
     url: VIEW_URL, cfg: { ...vcfg, maxChats: 3 }, bar: 0
   });
   check('3 meus na view com limite 3 => bloqueia', /limite atingido: 3\/3/.test(r.status?.gateReason || ''), JSON.stringify(r.status?.gateReason));
+
+  console.log('\n--- Puxar: cenario real (view com chat novo, barra em 0/desabilitada) ---');
+
+  const autoCfg = { mineSource: 'view', serveMethod: 'auto', allowedViewIds: '21225438247447' };
+
+  r = await run({ rows: realView, url: VIEW_URL, cfg: autoCfg, bar: 0, barDisabled: true });
+  check('barra desabilitada => cai no atalho Ctrl+Alt+Q', r.keys.length === 1, JSON.stringify({ keys: r.keys, gate: r.status?.gateReason }));
+  check('  e nao clica no botao desabilitado', r.clicks.length === 0, JSON.stringify(r.clicks));
+  check('  registra o pull no disjuntor', (r.stored?.recentServes || []).length === 1, JSON.stringify(r.stored?.recentServes));
+
+  // Botao habilitado: prefere o clique real, sem disparar o atalho junto.
+  r = await run({ rows: realView, url: VIEW_URL, cfg: autoCfg, bar: 2, barDisabled: false });
+  check('barra habilitada => clica no botao', r.clicks.includes('<botao-global>'), JSON.stringify(r.clicks));
+  check('  e nao dispara o atalho junto (pull duplo)', r.keys.length === 0, JSON.stringify(r.keys));
+
+  // Nada disponivel na view: nao pode disparar nada, mesmo com barra habilitada.
+  r = await run({
+    rows: [vrow({ id: 9, subject: 'Conversa com Z', badge: 'open', assignee: 'Carlos Lemos' })],
+    url: VIEW_URL, cfg: autoCfg, bar: 4, barDisabled: false
+  });
+  check('view sem chat novo => nao puxa mesmo com barra > 0', r.keys.length === 0 && r.clicks.length === 0, JSON.stringify({ keys: r.keys, clicks: r.clicks }));
+
+  // Limite estourado nao pode ser burlado pelo atalho.
+  r = await run({
+    rows: [
+      vrow({ id: 1, subject: 'A', badge: 'open', assignee: 'Carlos Lemos' }),
+      vrow({ id: 2, subject: 'B', badge: 'open', assignee: 'Carlos Lemos' }),
+      vrow({ id: 3, subject: 'C', badge: 'new', assignee: '-' })
+    ],
+    url: VIEW_URL, cfg: { ...autoCfg, maxChats: 2 }, bar: 0, barDisabled: true
+  });
+  check('limite atingido => atalho nao dispara', r.keys.length === 0, JSON.stringify({ keys: r.keys, gate: r.status?.gateReason }));
 
   console.log(`\n=== ${pass} passaram, ${fail} falharam ===\n`);
   process.exit(fail ? 1 : 0);

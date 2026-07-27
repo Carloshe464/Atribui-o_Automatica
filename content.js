@@ -1045,7 +1045,10 @@
     const mine = resolveMine(mineRows, conv, view);
     const q = queueWaiting(conv, pending, view);
 
-    verifyServe(conv ? conv.count : null, mine.value);
+    // Verifica pelo contador da FILA REAL (a view), nao pelo da barra: a barra
+    // fica em 0 mesmo havendo chat esperando, entao "a fila diminuiu" nunca
+    // seria verdade e todo pull era marcado como falho — inflando o cooldown.
+    verifyServe(q.count, mine.value);
 
     const setGate = (reason) => {
       status.gateReason = reason;
@@ -1184,7 +1187,7 @@
         serveAttempt = {
           at: Date.now(),
           method: res.method,
-          queueBefore: conv ? conv.count : null,
+          queueBefore: q.count, // da view, nao da barra
           mineBefore: mine.value,
           verified: false
         };
