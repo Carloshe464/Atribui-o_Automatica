@@ -43,6 +43,10 @@
     serveMethod: 'shortcut',
     shortcut: 'Ctrl+Alt+Q',
 
+    // A lista de conversas so existe no DOM com o painel aberto. Ligando isso,
+    // a extensao abre o painel sozinha quando o contador passa de zero.
+    autoOpenPanel: false,
+
     beep: true,
     debug: false,
 
@@ -107,10 +111,21 @@
   const SERVE_COOLDOWN_MS = 4000;
   const AGENT_RECHECK_MS = 5 * 60 * 1000;
 
+  // Carencia antes de esquecer uma conversa que sumiu da lista. Trocar de tela
+  // desmonta a lista inteira; sem isso, os timers de silencio zeravam a cada
+  // navegacao. 2 min e menor que o alerta de 6, entao nao mascara nada.
+  const IDLE_FORGET_MS = 2 * 60 * 1000;
+
+  // Quantas vezes tentar abrir o painel Conversas antes de desistir.
+  const PANEL_OPEN_TRIES = 3;
+  const PANEL_OPEN_COOLDOWN_MS = 8000;
+
   let cfg = { ...DEFAULTS };
   let lastServeAt = 0;
   let listSelectorUsed = '';
   let timerId = null;
+  let panelTries = 0;
+  let lastPanelTryAt = 0;
 
   /** key -> { fp, since, alerted } */
   const chats = new Map();
@@ -148,6 +163,13 @@
   const log = (...a) => {
     if (cfg.debug) console.log('%c[ZD-Auto]', 'color:#03363d;font-weight:700', ...a);
   };
+
+  /**
+   * innerText respeita renderizacao (da quebras de linha reais), mas nem sempre
+   * esta disponivel. Sem o fallback, uma linha com innerText vazio era ignorada
+   * silenciosamente pelo rastreio de silencio.
+   */
+  const text = (el) => el?.innerText || el?.textContent || '';
 
   function isVisible(el) {
     if (!el || !el.isConnected) return false;
@@ -281,7 +303,7 @@
     const labels = labelTexts(row);
     if (labels.includes(target)) return { ok: true, detected: cfg.queueFilter };
 
-    if (cfg.queueMatchMode === 'contains' && norm(row.innerText).includes(target)) {
+    if (cfg.queueMatchMode === 'contains' && norm(text(row)).includes(target)) {
       return { ok: true, detected: cfg.queueFilter };
     }
 
@@ -369,15 +391,41 @@
     return [];
   }
 
+  /**
+   * O data-test-id "toolbar-serve-chat-button" e, na verdade, o botao "Conversas"
+   * da barra superior, com o contador embutido no texto ("Conversas\n0") e
+   * desabilitado quando esta zerado. E o unico indicador de chat que existe em
+   * TODAS as telas — a lista some ao navegar, a barra nao.
+   */
+  function readConversationsButton() {
+    const el =
+      document.querySelector('[data-test-id="toolbar-serve-chat-button"]') ||
+      [...document.querySelectorAll('button, [role="button"]')].find((b) =>
+        /^conversas\b/.test(norm(text(b)))
+      );
+    if (!el) return null;
+    const m = text(el).match(/\d+/);
+    return {
+      el,
+      count: m ? Number(m[0]) : null,
+      disabled: el.disabled || el.getAttribute('aria-disabled') === 'true'
+    };
+  }
+
   function rowKey(row) {
-    const label = (row.innerText || '')
+    const label = text(row)
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean)[0];
-    return label || row.getAttribute('data-conversation-id') || row.id || '';
+    return (
+      (label || '').slice(0, 80) ||
+      row.getAttribute('data-conversation-id') ||
+      row.id ||
+      ''
+    );
   }
 
-  const fingerprint = (row) => norm(row.innerText).replace(/\d+/g, '#');
+  const fingerprint = (row) => norm(text(row)).replace(/\d+/g, '#');
 
   // ------------------------------------------------------ disparo do atalho
 
@@ -509,15 +557,40 @@
       }
     }
 
-    for (const k of [...chats.keys()]) if (!seen.has(k)) chats.delete(k);
+    // Nao apaga na hora: trocar de tela desmonta a lista, e apagar aqui zerava
+    // todos os timers de silencio. So esquece depois de sumir por IDLE_FORGET_MS.
+    for (const [k, rec] of chats) {
+      if (seen.has(k)) {
+        rec.missingSince = 0;
+      } else if (!rec.missingSince) {
+        rec.missingSince = now;
+      } else if (now - rec.missingSince > IDLE_FORGET_MS) {
+        chats.delete(k);
+      }
+    }
   }
 
   function tick() {
     const ag = agentGate();
 
+    const conv = readConversationsButton();
+
     // Sempre varre: o popup mostra o status e o alerta de silencio roda
     // mesmo com a atribuicao automatica desligada.
     const rows = findRows();
+
+    // Sem painel aberto nao existe lista no DOM. Se houver conversa esperando
+    // e nada detectado, tenta abrir — algumas vezes, nao em loop.
+    if (cfg.autoOpenPanel && conv && conv.count > 0 && !conv.disabled && !rows.length) {
+      if (panelTries < PANEL_OPEN_TRIES && Date.now() - lastPanelTryAt > PANEL_OPEN_COOLDOWN_MS) {
+        lastPanelTryAt = Date.now();
+        panelTries++;
+        conv.el.click();
+        setAction(`Abrindo painel Conversas (tentativa ${panelTries})`);
+      }
+    } else if (rows.length) {
+      panelTries = 0;
+    }
     const pending = [];
     const mine = [];
     for (const row of rows) {
@@ -538,6 +611,9 @@
       pending: pending.length,
       eligible: eligible.length,
       blocked: verdicts.filter((v) => !v.ok).slice(0, 5).map((v) => ({ key: v.key, reason: v.reason })),
+      convCount: conv ? conv.count : null,
+      panelOpen: rows.length > 0,
+      tracked: chats.size, // conversas com timer de silencio ativo
       agent: ag ? { name: ag.name, ok: ag.ok, source: ag.source, why: ag.why } : null,
       listSelectorUsed
     };
@@ -604,7 +680,7 @@
   function probeEnvironment() {
     const serveBtn = document.querySelector('[data-test-id="toolbar-serve-chat-button"]');
     const convBtn = [...document.querySelectorAll('button, [role="button"]')].find((b) =>
-      /^conversas\b/.test(norm(b.innerText))
+      /^conversas\b/.test(norm(text(b)))
     );
     const path = location.pathname;
     return [
@@ -648,7 +724,64 @@
     });
   }
 
-  function diagnose() {
+  /**
+   * Sonda a API de busca. Objetivo: achar uma consulta que conte os chats ativos
+   * do Carlos sem depender do DOM — o DOM zera a cada troca de tela, a API nao.
+   * Compare os numeros com a realidade da tela pra escolher a consulta certa.
+   */
+  async function probeApi() {
+    if (!agent?.id) return ['  (id do agente nao resolvido — sem sondagem)'];
+
+    const queries = [
+      `type:ticket assignee:${agent.id} status<solved`,
+      `type:ticket assignee:${agent.id} status:new`,
+      `type:ticket assignee:${agent.id} status:open`,
+      `type:ticket assignee:${agent.id} status:pending`,
+      `type:ticket assignee:${agent.id} status<solved via:chat`,
+      `type:ticket status:new group:"${cfg.queueFilter}"`
+    ];
+
+    const out = [];
+    for (const q of queries) {
+      try {
+        const r = await fetch(`/api/v2/search/count.json?query=${encodeURIComponent(q)}`, {
+          credentials: 'include',
+          headers: { Accept: 'application/json' }
+        });
+        const j = await r.json().catch(() => ({}));
+        out.push(`  HTTP ${r.status}  count=${j?.count ?? '?'}  ${q}`);
+      } catch (e) {
+        out.push(`  ERRO ${e.message}  ${q}`);
+      }
+    }
+    return out;
+  }
+
+  /** Lista os grupos: se a fila for um group do Zendesk, da pra filtrar por API. */
+  async function probeGroups() {
+    try {
+      const r = await fetch('/api/v2/groups.json?per_page=100', {
+        credentials: 'include',
+        headers: { Accept: 'application/json' }
+      });
+      if (!r.ok) return [`  HTTP ${r.status} ao listar grupos`];
+      const j = await r.json();
+      const groups = j?.groups || [];
+      const hits = groups.filter((g) => /especializ|nfs/i.test(g.name));
+      return [
+        `  total de grupos: ${groups.length}`,
+        ...(hits.length
+          ? hits.map((g) => `  MATCH id=${g.id} nome=${JSON.stringify(g.name)}`)
+          : ['  nenhum grupo casa com /especializ|nfs/i']),
+        '  primeiros 15 nomes:',
+        ...groups.slice(0, 15).map((g) => `    ${g.id}  ${JSON.stringify(g.name)}`)
+      ];
+    } catch (e) {
+      return [`  ERRO ${e.message}`];
+    }
+  }
+
+  async function diagnose() {
     const testIds = new Map();
     document.querySelectorAll('[data-test-id]').forEach((el) => {
       if (!isVisible(el)) return;
@@ -695,6 +828,12 @@
       '--- panorama do ambiente ---',
       ...probeEnvironment().map((l) => '  ' + l),
       '',
+      '--- API: contagens (achar a consulta que reflete os chats ativos) ---',
+      ...(await probeApi()),
+      '',
+      '--- API: grupos (a fila e um group do Zendesk?) ---',
+      ...(await probeGroups()),
+      '',
       '--- celulas da tabela de views (achar o campo da fila) ---',
       ...(dumpTableRows().length ? dumpTableRows() : ['  (nenhuma linha de tabela)']),
       '',
@@ -725,8 +864,10 @@
       return true;
     }
     if (msg?.type === 'zd-diag') {
-      sendResponse({ report: diagnose() });
-      return true;
+      diagnose()
+        .then((report) => sendResponse({ report }))
+        .catch((e) => sendResponse({ report: `falha no diagnostico: ${e.message}` }));
+      return true; // resposta assincrona
     }
     return false;
   });

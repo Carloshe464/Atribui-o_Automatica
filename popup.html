@@ -73,6 +73,7 @@
   </div>
 
   <div class="card" id="status">
+    <div class="row"><span>Barra: "Conversas"</span><span id="s-conv">–</span></div>
     <div class="row"><span>Chats meus</span><span id="s-mine">–</span></div>
     <div class="row"><span>Pendentes (todas as filas)</span><span id="s-pending">–</span></div>
     <div class="row"><span>Elegíveis pelas 3 regras</span><span id="s-eligible">–</span></div>
@@ -141,6 +142,11 @@
     Os dois primeiros modos servem <b>o próximo da fila</b>, sem escolher qual.
     Para não violar as regras de fila e status, só disparam quando
     <b>todos</b> os pendentes forem elegíveis.
+  </div>
+
+  <div class="check">
+    <input type="checkbox" id="autoOpenPanel">
+    <label for="autoOpenPanel">Abrir o painel "Conversas" sozinho</label>
   </div>
 
   <div class="check">

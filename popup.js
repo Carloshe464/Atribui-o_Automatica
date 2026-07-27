@@ -1,5 +1,6 @@
 const FIELDS = {
   enabled: 'checkbox',
+  autoOpenPanel: 'checkbox',
   beep: 'checkbox',
   debug: 'checkbox',
   maxChats: 'number',
@@ -26,6 +27,7 @@ const DEFAULTS = {
   allowedStatuses: 'novo',
   serveMethod: 'shortcut',
   shortcut: 'Ctrl+Alt+Q',
+  autoOpenPanel: false,
   beep: true,
   debug: false,
   listItemSelector: '',
@@ -132,6 +134,10 @@ async function refresh() {
   $('g3').textContent = `só ${cfg.allowedStatuses}`;
   mark('g3', st.pending === 0 ? null : st.eligible > 0);
 
+  $('s-conv').textContent =
+    st.convCount === null || st.convCount === undefined
+      ? 'botão não achado'
+      : `${st.convCount}${st.convCount > 0 && !st.panelOpen ? ' (painel fechado)' : ''}`;
   $('s-mine').textContent = `${st.mine} / ${cfg.maxChats}`;
   $('s-pending').textContent = st.pending;
   $('s-eligible').textContent = st.eligible;

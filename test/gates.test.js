@@ -21,7 +21,7 @@ function row({ name, queue, status, badge, pending, extra = '' }) {
   </div>`;
 }
 
-async function run({ rows, agentName = 'Carlos Lemos', cfg = {} }) {
+async function run({ rows, agentName = 'Carlos Lemos', cfg = {}, mutate = null, waitMs = 1500 }) {
   const dom = new JSDOM(`<!doctype html><body><nav>${rows.join('')}</nav></body>`, {
     url: 'https://acme.zendesk.com/agent/dashboard',
     runScripts: 'outside-only'
@@ -86,7 +86,13 @@ async function run({ rows, agentName = 'Carlos Lemos', cfg = {} }) {
   };
 
   w.eval(SRC);
-  await new Promise((r) => setTimeout(r, 1500)); // deixa o fetch resolver + 1 ciclo
+  await new Promise((r) => setTimeout(r, waitMs)); // deixa o fetch resolver + 1 ciclo
+
+  // Simula troca de tela: a lista e desmontada e o ciclo roda de novo.
+  if (mutate) {
+    mutate(w.document);
+    await new Promise((r) => setTimeout(r, 1500));
+  }
 
   listeners[0]?.({ type: 'zd-status' }, null, (res) => { statusReply = res; });
   dom.window.close();
@@ -233,6 +239,19 @@ function check(label, cond, detail) {
     ]
   });
   check('2 chats meus => assume o 3o', r.clicks.length === 1, JSON.stringify(r.clicks));
+
+  console.log('\n--- Timer de silencio sobrevive a troca de tela ---');
+
+  r = await run({ rows: [row({ name: 'Cliente A', queue: NFS, status: 'Aberto', pending: false })] });
+  check('conversa minha entra em rastreio', r.status?.tracked === 1, JSON.stringify(r.status?.tracked));
+
+  r = await run({
+    rows: [row({ name: 'Cliente A', queue: NFS, status: 'Aberto', pending: false })],
+    // desmonta a lista, como o Agent Workspace faz ao navegar
+    mutate: (doc) => { doc.querySelector('nav').innerHTML = ''; }
+  });
+  check('lista desmontada => nao perde o rastreio (carencia)', r.status?.tracked === 1, JSON.stringify(r.status?.tracked));
+  check('  e a contagem de "meus" reflete a tela atual', r.status?.mine === 0, JSON.stringify(r.status?.mine));
 
   console.log(`\n=== ${pass} passaram, ${fail} falharam ===\n`);
   process.exit(fail ? 1 : 0);
